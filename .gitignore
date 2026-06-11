@@ -1,0 +1,6 @@
+nyx-serve
+script.nx
+script.ll
+packages/
+*.o
+.DS_Store

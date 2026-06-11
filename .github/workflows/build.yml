@@ -1,0 +1,40 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build with Nyx toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make git libgc-dev libssl-dev zlib1g-dev
+
+      - name: Install Nyx toolchain
+        run: |
+          curl -sSf https://nyxlang.com/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify toolchain
+        run: nyx --version
+
+      - name: Build product
+        run: nyx build
+
+      - name: Verify binary produced
+        run: |
+          BIN=$(basename "$PWD")
+          if [ ! -x "./$BIN" ]; then
+              echo "ERROR: binary $BIN not found after nyx build"
+              exit 1
+          fi
+          echo "✓ Binary $BIN produced successfully"
+          ls -lh "./$BIN"

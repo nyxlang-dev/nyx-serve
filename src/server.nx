@@ -1,0 +1,230 @@
+// server.nx — Connects std/web.nx App framework with http_serve_mt
+// Converts raw HTTP request arrays to Request structs, does route matching,
+// runs before/after hooks, and formats Response structs back to HTTP strings.
+
+import "std/web"
+import "std/http"
+import "src/files"
+
+// Global App reference for the MT handler (set by serve_app)
+var __serve_app: App = app_new()
+
+// Detect Content-Type from body content (heuristic fallback)
+fn __detect_content_type(body: String) -> String {
+    if body.length() == 0 { return "text/plain" }
+    let first: int = body.charAt(0)
+    if first == 60 { return "text/html; charset=utf-8" }
+    if first == 123 or first == 91 { return "application/json" }
+    return "text/plain; charset=utf-8"
+}
+
+// Format a Response struct into an HTTP response string
+fn __format_http_response(resp: Response) -> String {
+    let status: int = resp.status
+    let body: String = resp.body
+
+    // Handle redirects
+    if status == 301 or status == 302 {
+        var sb: StringBuilder = StringBuilder.new()
+        sb.append("HTTP/1.1 ")
+        sb.append(int_to_string(status))
+        sb.append(" ")
+        sb.append(http_status_text(status))
+        sb.append("\r\nLocation: ")
+        sb.append(body)
+        sb.append("\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+        return sb.to_string()
+    }
+
+    var sb: StringBuilder = StringBuilder.new()
+    sb.append("HTTP/1.1 ")
+    sb.append(int_to_string(status))
+    sb.append(" ")
+    sb.append(http_status_text(status))
+    sb.append("\r\n")
+
+    // Content-Length
+    sb.append("Content-Length: ")
+    sb.append(int_to_string(str_byte_length(body)))
+    sb.append("\r\n")
+
+    // Add custom headers from Response
+    let headers: Array = resp.headers_flat
+    var has_content_type: bool = false
+    var i: int = 0
+    while i + 1 < headers.length() {
+        let k: String = headers[i]
+        let v: String = headers[i + 1]
+        sb.append(k)
+        sb.append(": ")
+        sb.append(v)
+        sb.append("\r\n")
+        if k == "Content-Type" { has_content_type = true }
+        i = i + 2
+    }
+
+    // Auto-detect Content-Type if not set
+    if has_content_type == false {
+        sb.append("Content-Type: ")
+        sb.append(__detect_content_type(body))
+        sb.append("\r\n")
+    }
+
+    sb.append("Connection: keep-alive\r\n")
+    sb.append("\r\n")
+    sb.append(body)
+    return sb.to_string()
+}
+
+// MT handler: converts raw request Array to Request struct and dispatches
+fn __serve_mt_dispatch(raw: Array) -> String {
+    let method: String = raw[1]
+    let path: String = raw[2]
+    let headers: Array = raw[3]
+    let body: String = raw[4]
+
+    // Empty method = client disconnected
+    if method.length() == 0 {
+        return ""
+    }
+
+    // Clean path (strip query string for routing)
+    var clean_path: String = path
+    let qp: int = path.indexOf("?")
+    if qp >= 0 { clean_path = path.substring(0, qp) }
+
+    // Build Request struct
+    let query: Map = parse_query_string(path)
+    let cookies: Map = parse_cookies(headers)
+    let form: Map = map_new()
+    let params: Map = map_new()
+    var req: Request = Request {
+        method: method,
+        path: clean_path,
+        query: query,
+        headers_flat: headers,
+        body: body,
+        form: form,
+        cookies: cookies,
+        params: params
+    }
+
+    // Run middlewares
+    let middlewares: Array = __serve_app.middlewares
+    var mi: int = 0
+    while mi < middlewares.length() {
+        let mw: Fn(Request) -> Response = middlewares[mi]
+        let mw_resp: Response = mw(req)
+        if mw_resp.status != 0 {
+            // Middleware short-circuited (e.g. CORS OPTIONS, rate limit)
+            return __format_http_response(mw_resp)
+        }
+        mi = mi + 1
+    }
+
+    // Try each route
+    let routes: Array = __serve_app.routes
+    var i: int = 0
+    while i < routes.length() {
+        let route: Route = routes[i]
+        let rm: String = route.method
+        if rm == method {
+            let rp: String = route.pattern
+            let match_params: Map = route_match(rp, clean_path)
+            if match_params.contains("_matched") {
+                req.params = match_params
+                let cb: Fn(Request) -> Response = route.handler
+                let resp: Response = cb(req)
+                return __format_http_response(resp)
+            }
+        }
+        i = i + 1
+    }
+
+    // If-None-Match is a conditional request header for ETag-based caching;
+    // we honor it for static files (routes can use apply_etag themselves if
+    // they want the same behavior).
+    let inm: String = http_find_header(headers, "If-None-Match")
+
+    // Try prefix-based static file serving (app_static registrations)
+    let prefix_resp: Response = try_serve_static_prefix(clean_path)
+    if prefix_resp.status != 0 {
+        let tagged: Response = apply_etag(prefix_resp, inm)
+        return __format_http_response(tagged)
+    }
+
+    // Try fallback static file serving (serve_static registration)
+    let static_dir: String = __serve_app.static_dir
+    if static_dir.length() > 0 {
+        let file_resp: Response = try_serve_static(static_dir, clean_path)
+        if file_resp.status != 0 {
+            let tagged: Response = apply_etag(file_resp, inm)
+            return __format_http_response(tagged)
+        }
+    }
+
+    // 404 Not Found
+    let not_found: Response = response_html(404, "<h1>404 Not Found</h1>")
+    return __format_http_response(not_found)
+}
+
+// Global channel for dispatching client fds to keep-alive workers
+var __serve_ch: Map = Map.new()
+
+// Keep-alive worker: serves multiple requests per connection
+fn __serve_ka_worker() -> int {
+    while 1 > 0 {
+        let client: int = channel_recv(__serve_ch)
+        if client < 0 { return 0 }
+
+        // Keep-alive loop for this connection
+        var keep_alive: bool = true
+        while keep_alive {
+            let request: Array = http_parse_request_fast(client)
+            let method: String = request[1]
+            if method.length() == 0 {
+                keep_alive = false
+            } else {
+                let response: String = __serve_mt_dispatch(request)
+                if response.length() > 0 {
+                    tcp_write(client, response)
+                }
+                let headers: Array = request[3]
+                let conn: String = http_find_header(headers, "Connection")
+                if conn == "close" {
+                    keep_alive = false
+                }
+            }
+        }
+        tcp_close(client)
+    }
+    return 0
+}
+
+// Start the app server on the given port with the given number of workers.
+// This function blocks (runs the accept loop forever).
+pub fn serve_app(app: App, port: int, workers: int) -> int {
+    __serve_app = app
+    print("nyx-serve starting on port " + int_to_string(port) + " with " + int_to_string(workers) + " workers")
+
+    __serve_ch = channel_new(512)
+    let server: int = tcp_listen("0.0.0.0", port)
+    if server < 0 {
+        print("ERROR: cannot listen on port " + int_to_string(port))
+        return 0
+    }
+
+    var i: int = 0
+    while i < workers {
+        thread_spawn(__serve_ka_worker)
+        i = i + 1
+    }
+
+    while 1 > 0 {
+        let client: int = tcp_accept(server)
+        if client >= 0 {
+            channel_send(__serve_ch, client)
+        }
+    }
+    return 0
+}

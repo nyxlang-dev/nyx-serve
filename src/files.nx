@@ -1,0 +1,240 @@
+// static.nx — Static file serving for nyx-serve
+// Serves files from a directory with MIME type detection by extension.
+
+import "std/web"
+
+// Detect MIME type from file extension
+pub fn detect_mime_type(path: String) -> String {
+    if path.endsWith(".html") or path.endsWith(".htm") { return "text/html; charset=utf-8" }
+    if path.endsWith(".css") { return "text/css; charset=utf-8" }
+    if path.endsWith(".js") { return "application/javascript; charset=utf-8" }
+    if path.endsWith(".json") { return "application/json" }
+    if path.endsWith(".png") { return "image/png" }
+    if path.endsWith(".jpg") or path.endsWith(".jpeg") { return "image/jpeg" }
+    if path.endsWith(".gif") { return "image/gif" }
+    if path.endsWith(".svg") { return "image/svg+xml" }
+    if path.endsWith(".ico") { return "image/x-icon" }
+    if path.endsWith(".woff") { return "font/woff" }
+    if path.endsWith(".woff2") { return "font/woff2" }
+    if path.endsWith(".ttf") { return "font/ttf" }
+    if path.endsWith(".xml") { return "application/xml" }
+    if path.endsWith(".txt") { return "text/plain; charset=utf-8" }
+    if path.endsWith(".md") { return "text/markdown; charset=utf-8" }
+    if path.endsWith(".wasm") { return "application/wasm" }
+    return "application/octet-stream"
+}
+
+// Try to serve a static file. Returns Response with status=0 if file not found.
+pub fn try_serve_static(base_dir: String, url_path: String) -> Response {
+    let empty_hdrs: Array = []
+    let not_found: Response = Response { status: 0, headers_flat: empty_hdrs, body: "" }
+
+    // Directory paths: try index.html
+    if url_path.endsWith("/") or url_path == "" {
+        let index_path: String = base_dir + url_path + "index.html"
+        if file_exists(index_path) {
+            let content: String = read_file(index_path)
+            let hdrs: Array = ["Content-Type", "text/html; charset=utf-8"]
+            return Response { status: 200, headers_flat: hdrs, body: content }
+        }
+        return not_found
+    }
+
+    // File paths: check that path has an extension (to avoid reading directories)
+    let file_path: String = base_dir + url_path
+    let dot_idx: int = url_path.indexOf(".")
+    if dot_idx < 0 {
+        // No extension — could be a directory, try with /index.html
+        let dir_index: String = file_path + "/index.html"
+        if file_exists(dir_index) {
+            let content: String = read_file(dir_index)
+            let hdrs: Array = ["Content-Type", "text/html; charset=utf-8"]
+            return Response { status: 200, headers_flat: hdrs, body: content }
+        }
+        return not_found
+    }
+
+    if file_exists(file_path) == false {
+        return not_found
+    }
+
+    let content: String = read_file(file_path)
+    let mime: String = detect_mime_type(file_path)
+    let hdrs: Array = ["Content-Type", mime]
+    return Response { status: 200, headers_flat: hdrs, body: content }
+}
+
+// Register a directory as the static file root for the app.
+// All requests not matched by routes will try this directory.
+pub fn serve_static(app: App, base_dir: String) {
+    app.static_dir = base_dir
+}
+
+// Global registry of prefix→directory static mappings.
+// Flat array: [prefix1, dir1, prefix2, dir2, ...]
+var __static_prefixes: Array = []
+
+// Global registry of prefix→directory→max_age mappings for cached static.
+// Flat array: [prefix1, dir1, max_age1, prefix2, dir2, max_age2, ...].
+// Paralelo a __static_prefixes pero con la dimensión extra de caching.
+var __static_cache_config: Array = []
+
+// Register a prefix-based static file route.
+// Serves files from directory when URL starts with prefix.
+// Example: app_static(app, "/learn/", "static/learn/")
+//   /learn/01.html → static/learn/01.html
+// Rejects paths with ".." or "~" for security.
+pub fn app_static(app: App, prefix: String, directory: String) -> int {
+    if prefix.contains("..") or prefix.contains("~") { return 0 }
+    __static_prefixes.push(prefix)
+    __static_prefixes.push(directory)
+    return 0
+}
+
+// Register a prefix-based static route con headers de caching.
+// Además del mapping prefix→directory, setea Cache-Control: public, max-age=N
+// y Last-Modified: <file mtime> en cada response 200.
+// ETag existente sigue aplicándose via apply_etag en server.nx — los dos
+// headers se combinan (Cache-Control evita re-request; ETag valida si re-request).
+//
+// Example:
+//   app_static_cached(app, "/shared/css/", "static/shared/css/", 3600)   // 1h
+//   app_static_cached(app, "/shared/img/", "static/shared/img/", 86400)  // 1d
+pub fn app_static_cached(app: App, prefix: String, directory: String, max_age: int) -> int {
+    if prefix.contains("..") or prefix.contains("~") { return 0 }
+    __static_cache_config.push(prefix)
+    __static_cache_config.push(directory)
+    __static_cache_config.push(max_age)
+    return 0
+}
+
+// Format a Unix epoch as an HTTP date per RFC 7231.
+// Format: "Mon, 22 Apr 2026 14:32:10 GMT"
+// NOTE: assumes the system timezone is UTC (production servers do). If TZ
+// is not UTC the local extractors below will drift — no bug here, but a
+// deployment constraint.
+fn __format_http_date(epoch: int) -> String {
+    let year: int = datetime_year(epoch)
+    let month: int = datetime_month(epoch)
+    let day: int = datetime_day(epoch)
+    let hour: int = datetime_hour(epoch)
+    let minute: int = datetime_minute(epoch)
+    let second: int = datetime_second(epoch)
+    let wday: int = datetime_weekday(epoch)
+
+    let days: Array = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    let months: Array = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    let day_name: String = days[wday]
+    let month_name: String = months[month - 1]
+
+    return day_name + ", " + __pad2(day) + " " + month_name + " " +
+           int_to_string(year) + " " + __pad2(hour) + ":" + __pad2(minute) +
+           ":" + __pad2(second) + " GMT"
+}
+
+fn __pad2(n: int) -> String {
+    if n < 10 { return "0" + int_to_string(n) }
+    return int_to_string(n)
+}
+
+// Return the UNIX mtime of a file, or 0 if stat fails.
+fn __file_mtime(path: String) -> int {
+    let info: Array = stat(path)
+    if info.length() < 3 { return 0 }
+    return info[2]
+}
+
+// Compute a weak ETag for a static-file body. SHA-256 keeps false negatives
+// negligible across body mutations without us having to hand-roll a hash.
+// Wrapped in W/"..." to mark it as a weak validator (semantically equivalent,
+// not byte-for-byte identical across transforms).
+pub fn compute_weak_etag(content: String) -> String {
+    let digest: String = sha256(content)
+    let short: String = digest.substring(0, 16)
+    return "W/\"" + short + "\""
+}
+
+// Augment a 200 static-file Response with an ETag header and, when the
+// caller's If-None-Match matches, collapse it to a bare 304 Not Modified.
+// Pass "" for if_none_match to just add the header without the 304 check.
+pub fn apply_etag(resp: Response, if_none_match: String) -> Response {
+    if resp.status != 200 { return resp }
+    let etag: String = compute_weak_etag(resp.body)
+    if if_none_match.length() > 0 {
+        if if_none_match == etag {
+            let hdrs_304: Array = ["ETag", etag]
+            return Response { status: 304, headers_flat: hdrs_304, body: "" }
+        }
+    }
+    var new_hdrs: Array = resp.headers_flat
+    new_hdrs.push("ETag")
+    new_hdrs.push(etag)
+    return Response { status: resp.status, headers_flat: new_hdrs, body: resp.body }
+}
+
+// Try to serve a request from registered static prefixes.
+// Returns Response with status=0 if no prefix matched or file not found.
+// Los prefixes cacheados (registrados via app_static_cached) agregan
+// headers Cache-Control: public, max-age=N y Last-Modified en los 200.
+pub fn try_serve_static_prefix(path: String) -> Response {
+    let empty_hdrs: Array = []
+    let no_match: Response = Response { status: 0, headers_flat: empty_hdrs, body: "" }
+
+    // Cached prefixes — evaluados primero para que una mapping cacheada
+    // más específica gane sobre una legacy genérica.
+    var ci: int = 0
+    while ci + 2 < __static_cache_config.length() {
+        let prefix: String = __static_cache_config[ci]
+        let directory: String = __static_cache_config[ci + 1]
+        let max_age: int = __static_cache_config[ci + 2]
+        if path.startsWith(prefix) {
+            let rel_path: String = path.substring(prefix.length(), path.length())
+            if rel_path.contains("..") or rel_path.contains("~") {
+                return response_html(403, "<h1>403 Forbidden</h1>")
+            }
+            let resp: Response = try_serve_static(directory, "/" + rel_path)
+            if resp.status != 0 {
+                return __apply_cache_headers(resp, directory + "/" + rel_path, max_age)
+            }
+        }
+        ci = ci + 3
+    }
+
+    // Legacy prefixes (sin caching) — mantiene el comportamiento actual.
+    var i: int = 0
+    while i + 1 < __static_prefixes.length() {
+        let prefix: String = __static_prefixes[i]
+        let directory: String = __static_prefixes[i + 1]
+        if path.startsWith(prefix) {
+            let rel_path: String = path.substring(prefix.length(), path.length())
+            if rel_path.contains("..") or rel_path.contains("~") {
+                return response_html(403, "<h1>403 Forbidden</h1>")
+            }
+            let resp: Response = try_serve_static(directory, "/" + rel_path)
+            if resp.status != 0 { return resp }
+        }
+        i = i + 2
+    }
+    return no_match
+}
+
+// Agrega Cache-Control: public, max-age=N y Last-Modified: <http-date>
+// a una Response 200. Si stat del archivo falla, solo se agrega
+// Cache-Control (Last-Modified es opcional por spec).
+fn __apply_cache_headers(resp: Response, file_path: String, max_age: int) -> Response {
+    if resp.status != 200 { return resp }
+
+    var new_hdrs: Array = resp.headers_flat
+    new_hdrs.push("Cache-Control")
+    new_hdrs.push("public, max-age=" + int_to_string(max_age))
+
+    let mtime: int = __file_mtime(file_path)
+    if mtime > 0 {
+        new_hdrs.push("Last-Modified")
+        new_hdrs.push(__format_http_date(mtime))
+    }
+
+    return Response { status: resp.status, headers_flat: new_hdrs, body: resp.body }
+}

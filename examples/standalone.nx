@@ -1,0 +1,51 @@
+// standalone.nx — Minimal smoke test of the nyx-serve library.
+//
+// Wires the three pieces the library provides (the `App` framework from
+// std/web, the `serve_app` MT server from src/server, and static file
+// helpers from src/files) into a tiny HTTP server that responds to "/"
+// with a plain-text hello. Use it as:
+//
+//   - a smoke test: `make build` in this directory runs the full
+//     compile path end-to-end without needing a full sites/ project
+//   - a copy-paste template: drop the body of main() into your own
+//     project's src/main.nx after declaring `nyx-serve = "*"` in your
+//     nyx.toml and importing from "nyx-serve/src/server"
+//
+// For a real production consumer see sites/nyxlang.com/src/main.nx in
+// the NyxLang monorepo, which builds on this same library.
+
+import "std/web"
+import "src/server"
+
+fn handle_root(req: Request) -> Response {
+    return response_html(200, "<h1>nyx-serve standalone</h1><p>OK</p>")
+}
+
+fn handle_health(req: Request) -> Response {
+    return response_json(200, "{\"status\":\"ok\"}")
+}
+
+fn main() {
+    // --port N (default 8080) — lo usa tests/integration/test_serve_kv.py
+    var port: int = 8080
+    let args: Array = get_args()
+    var ai: int = 1
+    while ai < args.length() {
+        let arg: String = args[ai]
+        if arg == "--port" and ai + 1 < args.length() {
+            let port_arg: String = args[ai + 1]
+            port = string_to_int(port_arg)
+            ai = ai + 2
+        } else {
+            ai = ai + 1
+        }
+    }
+
+    let app: App = app_new()
+    app_get(app, "/", handle_root)
+    app_get(app, "/health", handle_health)
+    // alias que usa tests/integration/test_serve_kv.py (contrato del daemon viejo)
+    app_get(app, "/api/health", handle_health)
+    print("nyx-serve standalone on :" + int_to_string(port))
+    serve_app(app, port, 4)
+}
