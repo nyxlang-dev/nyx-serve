@@ -1,0 +1,419 @@
+// server.nx — Connects std/web.nx App framework with the keep-alive MT server.
+// Converts raw HTTP request arrays to Request structs, runs before-hooks and
+// middlewares, does route matching, runs after-hooks over the final response
+// (via __finalize), and formats Response structs back to HTTP strings.
+
+import "std/web"
+import "std/http"
+import "src/files"
+
+// Global App reference for the MT handler (set by serve_app)
+var __serve_app: App = app_new()
+
+// WebSocket route registry (upstream of the venezuelainfo.org `serve_ws`
+// local patch — see PROJECT_STATE.md). Pattern uses the same {param}/*
+// syntax as std/web route_match. handler field is untyped Fn (same idiom
+// as std/web's Route.handler) — cast to Fn(Array) -> int at the call site.
+struct WsRoute {
+    pattern: String,
+    handler: Fn
+}
+
+var __serve_ws_routes: Array = []
+
+// Registers a WebSocket upgrade handler for a route pattern. The handler
+// receives [fd, path, headers_flat, params_pairs_flat] and returns 1 if it
+// took ownership of the fd (the server will not read from or close it — the
+// handler must do the handshake, serve the connection and close it itself)
+// or 0 to let the server respond/close normally. params_pairs_flat is a
+// NEW slot (index 3, additive): a flat [k1, v1, k2, v2, ...] array of the
+// {param} captures from the matched pattern, so a handler that only reads
+// slots 0..2 (the pre-app_ws contract) keeps working unchanged.
+pub fn app_ws(pattern: String, handler: Fn(Array) -> int) {
+    __serve_ws_routes.push(WsRoute { pattern: pattern, handler: handler })
+}
+
+// Compat alias for the venezuelainfo.org local patch this upstreams:
+// registers under the catch-all pattern so existing callers migrate with
+// no code changes. Prefer app_ws(pattern, handler) for new code.
+pub fn serve_ws(handler: Fn(Array) -> int) {
+    app_ws("*", handler)
+}
+
+// Flattens a route_match() params Map (minus the internal "_matched" key)
+// into a [k1, v1, k2, v2, ...] array for the WS handler's info[3].
+// NOTE: `params.get(k)` is bound to a typed `let v: String` before
+// `.push()` — pushing it inline (`out.push(params.get(k))`) reads back as
+// a raw pointer downstream (garbage int → GC OOM on the next allocation
+// that uses it as a size). Same class of gap as the documented Map.get/
+// arr[i]-inline fixes, but for untyped `.push()` (not covered by those).
+// See task-3.1-report.md.
+fn __ws_params_flat(params: Map) -> Array {
+    var out: Array = []
+    let keys: Array = params.keys()
+    var i: int = 0
+    while i < keys.length() {
+        let k: String = keys[i]
+        if k != "_matched" {
+            let v: String = params.get(k)
+            out.push(k)
+            out.push(v)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Detect Content-Type from body content (heuristic fallback)
+fn __detect_content_type(body: String) -> String {
+    if body.length() == 0 { return "text/plain" }
+    let first: int = body.charAt(0)
+    if first == 60 { return "text/html; charset=utf-8" }
+    if first == 123 or first == 91 { return "application/json" }
+    return "text/plain; charset=utf-8"
+}
+
+// Format a Response struct into an HTTP response string
+fn __format_http_response(resp: Response) -> String {
+    let status: int = resp.status
+    let body: String = resp.body
+
+    // Handle Location-based redirects (301/302/303/307/308). The redirect URL
+    // travels in resp.body (see response_redirect in std/web); resp.headers_flat
+    // is still emitted so a handler can set Set-Cookie/Cache-Control on a
+    // redirect (e.g. login/logout that sets or clears a session cookie).
+    if status == 301 or status == 302 or status == 303 or status == 307 or status == 308 {
+        var sb: StringBuilder = StringBuilder.new()
+        sb.append("HTTP/1.1 ")
+        sb.append(int_to_string(status))
+        sb.append(" ")
+        sb.append(http_status_text(status))
+        sb.append("\r\nLocation: ")
+        sb.append(body)
+        sb.append("\r\n")
+
+        // Emit custom headers (Set-Cookie, etc.), skipping ones we control here
+        let headers: Array = resp.headers_flat
+        var i: int = 0
+        while i + 1 < headers.length() {
+            let k: String = headers[i]
+            let v: String = headers[i + 1]
+            if k != "Location" and k != "Content-Length" {
+                sb.append(k)
+                sb.append(": ")
+                sb.append(v)
+                sb.append("\r\n")
+            }
+            i = i + 2
+        }
+
+        sb.append("Content-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+        return sb.to_string()
+    }
+
+    var sb: StringBuilder = StringBuilder.new()
+    sb.append("HTTP/1.1 ")
+    sb.append(int_to_string(status))
+    sb.append(" ")
+    sb.append(http_status_text(status))
+    sb.append("\r\n")
+
+    // Content-Length
+    sb.append("Content-Length: ")
+    sb.append(int_to_string(str_byte_length(body)))
+    sb.append("\r\n")
+
+    // Add custom headers from Response
+    let headers: Array = resp.headers_flat
+    var has_content_type: bool = false
+    var i: int = 0
+    while i + 1 < headers.length() {
+        let k: String = headers[i]
+        let v: String = headers[i + 1]
+        sb.append(k)
+        sb.append(": ")
+        sb.append(v)
+        sb.append("\r\n")
+        if k == "Content-Type" { has_content_type = true }
+        i = i + 2
+    }
+
+    // Auto-detect Content-Type if not set
+    if has_content_type == false {
+        sb.append("Content-Type: ")
+        sb.append(__detect_content_type(body))
+        sb.append("\r\n")
+    }
+
+    sb.append("Connection: keep-alive\r\n")
+    sb.append("\r\n")
+    sb.append(body)
+    return sb.to_string()
+}
+
+// Append all [name, value] pairs from src onto dst (interleaved header arrays).
+fn __collect_headers(dst: Array, src: Array) -> int {
+    var i: int = 0
+    while i + 1 < src.length() {
+        dst.push(src[i])
+        dst.push(src[i + 1])
+        i = i + 2
+    }
+    return 0
+}
+
+// Single exit point for every response path: merge headers contributed by
+// before-hooks/middlewares that continued, run after-hooks so they can
+// observe/modify the final status & headers (access-log, request-id,
+// analytics by status), then format the response to an HTTP string.
+fn __finalize(req: Request, resp: Response, extra_headers: Array) -> String {
+    __collect_headers(resp.headers_flat, extra_headers)
+
+    var r: Response = resp
+    let after_hooks: Array = __serve_app.after_hooks
+    var ai: int = 0
+    while ai < after_hooks.length() {
+        let hook: Fn(Request, Response) -> Response = after_hooks[ai]
+        r = hook(req, r)
+        ai = ai + 1
+    }
+
+    return __format_http_response(r)
+}
+
+// MT handler: converts raw request Array to Request struct and dispatches
+fn __serve_mt_dispatch(raw: Array) -> String {
+    let method: String = raw[1]
+    let path: String = raw[2]
+    let headers: Array = raw[3]
+    let body: String = raw[4]
+
+    // Empty method = client disconnected
+    if method.length() == 0 {
+        return ""
+    }
+
+    // Clean path (strip query string for routing)
+    var clean_path: String = path
+    let qp: int = path.indexOf("?")
+    if qp >= 0 { clean_path = path.substring(0, qp) }
+
+    // Build Request struct
+    let query: Map = parse_query_string(path)
+    let cookies: Map = parse_cookies(headers)
+    // req.form (fix 2026-07-22, cazado por el tutorial): el dispatcher NUNCA
+    // llamaba a parse_form_data — req.form llegaba SIEMPRE vacío aunque la
+    // doc lo prometía. Se puebla solo para urlencoded (multipart tiene su
+    // helper standalone multipart_parse; JSON va por el body crudo).
+    var form: Map = map_new()
+    if body.length() > 0 {
+        let req_ctype: String = http_find_header(headers, "Content-Type")
+        if req_ctype.indexOf("application/x-www-form-urlencoded") >= 0 {
+            form = parse_form_data(body, req_ctype)
+        }
+    }
+    let params: Map = map_new()
+    var req: Request = Request {
+        method: method,
+        path: clean_path,
+        query: query,
+        headers_flat: headers,
+        body: body,
+        form: form,
+        cookies: cookies,
+        params: params
+    }
+
+    // Accumulates headers contributed by before-hooks / middlewares that
+    // "continue" (status 0), so they reach the downstream response (e.g. a
+    // middleware setting a Set-Cookie while letting the handler run).
+    var extra: Array = []
+
+    // Run before-hooks first. Contract mirrors middleware: return a Response
+    // with status 0 to continue (optionally contributing headers via
+    // headers_flat), or a non-zero status to short-circuit the response.
+    let before_hooks: Array = __serve_app.before_hooks
+    var bi: int = 0
+    while bi < before_hooks.length() {
+        let hook: Fn(Request) -> Response = before_hooks[bi]
+        let hook_resp: Response = hook(req)
+        if hook_resp.status != 0 {
+            return __finalize(req, hook_resp, extra)
+        }
+        __collect_headers(extra, hook_resp.headers_flat)
+        bi = bi + 1
+    }
+
+    // Run middlewares
+    let middlewares: Array = __serve_app.middlewares
+    var mi: int = 0
+    while mi < middlewares.length() {
+        let mw: Fn(Request) -> Response = middlewares[mi]
+        let mw_resp: Response = mw(req)
+        if mw_resp.status != 0 {
+            // Middleware short-circuited (e.g. CORS OPTIONS, rate limit)
+            return __finalize(req, mw_resp, extra)
+        }
+        // Continued (status 0): carry its headers to the downstream response
+        __collect_headers(extra, mw_resp.headers_flat)
+        mi = mi + 1
+    }
+
+    // Try each route
+    let routes: Array = __serve_app.routes
+    var i: int = 0
+    while i < routes.length() {
+        let route: Route = routes[i]
+        let rm: String = route.method
+        if rm == method {
+            let rp: String = route.pattern
+            let match_params: Map = route_match(rp, clean_path)
+            if match_params.contains("_matched") {
+                req.params = match_params
+                let cb: Fn(Request) -> Response = route.handler
+                let resp: Response = cb(req)
+                return __finalize(req, resp, extra)
+            }
+        }
+        i = i + 1
+    }
+
+    // If-None-Match is a conditional request header for ETag-based caching;
+    // we honor it for static files (routes can use apply_etag themselves if
+    // they want the same behavior).
+    let inm: String = http_find_header(headers, "If-None-Match")
+
+    // Try prefix-based static file serving (app_static registrations)
+    let prefix_resp: Response = try_serve_static_prefix(clean_path)
+    if prefix_resp.status != 0 {
+        let tagged: Response = apply_etag(prefix_resp, inm)
+        return __finalize(req, tagged, extra)
+    }
+
+    // Try fallback static file serving (serve_static registration)
+    let static_dir: String = __serve_app.static_dir
+    if static_dir.length() > 0 {
+        let file_resp: Response = try_serve_static(static_dir, clean_path)
+        if file_resp.status != 0 {
+            let tagged: Response = apply_etag(file_resp, inm)
+            return __finalize(req, tagged, extra)
+        }
+    }
+
+    // 404 Not Found
+    let not_found: Response = response_html(404, "<h1>404 Not Found</h1>")
+    return __finalize(req, not_found, extra)
+}
+
+// Global channel for dispatching client fds to keep-alive workers
+var __serve_ch: Map = Map.new()
+
+// Keep-alive worker: serves multiple requests per connection
+fn __serve_ka_worker() -> int {
+    while 1 > 0 {
+        let client: int = channel_recv(__serve_ch)
+        if client < 0 { return 0 }
+
+        // Keep-alive loop for this connection
+        var keep_alive: bool = true
+        // Set by a WS handler that returns 1 (took ownership of the fd):
+        // the worker must not read from or close it afterward.
+        var ws_owned: bool = false
+        while keep_alive {
+            let request: Array = http_parse_request_fast(client)
+            let method: String = request[1]
+            if method.length() == 0 {
+                keep_alive = false
+            } else {
+                // Body sobre el cap (NYX_HTTP_MAX_BODY): el fast parser lo
+                // señala en el slot 5 SIN drenar el body (drenarlo sería un
+                // vector DoS) → responder 413 y CERRAR la conexión (el
+                // socket queda con el body sin consumir, no sirve para
+                // otro request keep-alive).
+                let req_err: int = request[5]
+                if req_err == 413 {
+                    tcp_write(client, "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    keep_alive = false
+                } else {
+                let path: String = request[2]
+                let headers: Array = request[3]
+                let upg: String = http_find_header(headers, "Upgrade")
+                if __serve_ws_routes.length() > 0 and upg.toLower() == "websocket" {
+                    var clean_path: String = path
+                    let qp: int = path.indexOf("?")
+                    if qp >= 0 { clean_path = path.substring(0, qp) }
+
+                    var matched: bool = false
+                    var wi: int = 0
+                    while wi < __serve_ws_routes.length() and !matched {
+                        let wr: WsRoute = __serve_ws_routes[wi]
+                        let mp: Map = route_match(wr.pattern, clean_path)
+                        if mp.contains("_matched") {
+                            matched = true
+                            var info: Array = []
+                            info.push(client)
+                            info.push(path)
+                            info.push(headers)
+                            info.push(__ws_params_flat(mp))
+                            let wh: Fn(Array) -> int = wr.handler
+                            if wh(info) == 1 {
+                                ws_owned = true
+                            }
+                        }
+                        wi = wi + 1
+                    }
+                    if !matched {
+                        // No WS route matched this path: respond with a
+                        // normal, well-formed 404 via the framework's own
+                        // formatter (not raw tcp_write strings).
+                        let not_found: Response = response_html(404, "<h1>404 Not Found</h1>")
+                        tcp_write(client, __format_http_response(not_found))
+                    }
+                    keep_alive = false
+                } else {
+                    let response: String = __serve_mt_dispatch(request)
+                    if response.length() > 0 {
+                        tcp_write(client, response)
+                    }
+                    let conn: String = http_find_header(headers, "Connection")
+                    if conn == "close" {
+                        keep_alive = false
+                    }
+                }
+                }
+            }
+        }
+        if !ws_owned {
+            tcp_close(client)
+        }
+    }
+    return 0
+}
+
+// Start the app server on the given port with the given number of workers.
+// This function blocks (runs the accept loop forever).
+pub fn serve_app(app: App, port: int, workers: int) -> int {
+    __serve_app = app
+    print("nyx-serve starting on port " + int_to_string(port) + " with " + int_to_string(workers) + " workers")
+
+    __serve_ch = channel_new(512)
+    let server: int = tcp_listen("0.0.0.0", port)
+    if server < 0 {
+        print("ERROR: cannot listen on port " + int_to_string(port))
+        return 0
+    }
+
+    var i: int = 0
+    while i < workers {
+        thread_spawn(__serve_ka_worker)
+        i = i + 1
+    }
+
+    while 1 > 0 {
+        let client: int = tcp_accept(server)
+        if client >= 0 {
+            channel_send(__serve_ch, client)
+        }
+    }
+    return 0
+}

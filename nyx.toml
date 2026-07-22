@@ -1,0 +1,15 @@
+[package]
+name = "nyx-serve"
+version = "0.3.0"
+main = "examples/standalone.nx"
+description = "HTTP framework library: routing, middleware, static serving with caching, cookie sessions"
+
+# nyx-serve is consumed as a library by concrete web projects.
+# The production consumers are the landing pages in the
+# nyxlang-dev/nyx-sites repo (nyxlang.com, serve.nyxlang.com, proxy.nyxlang.com),
+# each declaring `nyx-serve = "*"` in its nyx.toml. Running `nyx build`
+# from this directory produces a small HTTP-only reference binary built
+# from examples/standalone.nx, meant as a smoke test of the library's
+# public API (App, Request, Response, serve_app, app_static).
+
+[dependencies]

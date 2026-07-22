@@ -1,0 +1,245 @@
+// standalone.nx — Minimal smoke test of the nyx-serve library.
+//
+// Wires the three pieces the library provides (the `App` framework from
+// std/web, the `serve_app` MT server from src/server, and static file
+// helpers from src/files) into a tiny HTTP server that responds to "/"
+// with a plain-text hello. Use it as:
+//
+//   - a smoke test: `make build` in this directory runs the full
+//     compile path end-to-end without needing a full sites/ project
+//   - a copy-paste template: drop the body of main() into your own
+//     project's src/main.nx after declaring `nyx-serve = "*"` in your
+//     nyx.toml and importing from "nyx-serve/src/server"
+//
+// For a real production consumer see nyxlang.com/src/main.nx in the
+// nyxlang-dev/nyx-sites repo, which builds on this same library.
+
+import "std/web"
+import "std/websocket"
+import "src/server"
+import "src/template"
+import "src/multipart"
+
+fn handle_root(req: Request) -> Response {
+    return response_html(200, "<h1>nyx-serve standalone</h1><p>OK</p>")
+}
+
+fn handle_health(req: Request) -> Response {
+    return response_json(200, "{\"status\":\"ok\"}")
+}
+
+// Renders a fixed template through src/template.nx (Task 3.2), exercising
+// escaped interpolation, {{#if}}/{{else}}, and {{#each}} together in one
+// pass — the E2E counterpart of tests/test_template.nx's unit checks.
+// Deterministic ctx (no request input) so test_serve_smoke.py can assert
+// on the exact HTML byte-for-byte.
+fn handle_template_demo(req: Request) -> Response {
+    var item1: Map = map_new()
+    item1.insert("name", "Ann")
+    var item2: Map = map_new()
+    item2.insert("name", "<Bob>")
+    var items: Array = [item1, item2]
+
+    var ctx: Map = map_new()
+    ctx.insert("title", "<Nyx>")
+    ctx.insert("show_list", "1")
+    ctx.insert("items", items)
+
+    let tmpl: String = "<h1>{{title}}</h1>{{#if show_list}}<ul>{{#each items}}<li>{{name}}</li>{{/each}}</ul>{{else}}<p>empty</p>{{/if}}"
+    let html: String = tpl_render(tmpl, ctx)
+    return response_html(200, html)
+}
+
+// Task 3.3 E2E surface: parses a multipart/form-data POST body via
+// src/multipart.nx (standalone helper — does NOT touch req.form, per the
+// arc's design) and responds with a deterministic per-part summary
+// ("name:filename:size_in_bytes" lines) so test_serve_smoke.py can assert
+// on it byte-exactly. `part_value(p).length()` is used for size (bytes,
+// not chars — strings=bytes contract), so this doubles as the E2E
+// binary-safety check for the file part.
+fn handle_multipart_demo(req: Request) -> Response {
+    let ctype: String = http_find_header(req.headers_flat, "Content-Type")
+    let parts: Array = multipart_parse(req.body, ctype)
+    var sb: StringBuilder = StringBuilder.new()
+    var i: int = 0
+    while i < parts.length() {
+        let p: Array = parts[i]
+        let name: String = part_name(p)
+        let filename: String = part_filename(p)
+        let value: String = part_value(p)
+        sb.append(name)
+        sb.append(":")
+        sb.append(filename)
+        sb.append(":")
+        sb.append(int_to_string(value.length()))
+        sb.append("\n")
+        i = i + 1
+    }
+    return response_text(200, sb.to_string())
+}
+
+// Redirect that also sets a cookie — exercises the 3xx headers_flat fix
+// (Set-Cookie must survive on a 302, as login/logout flows need).
+// req.form E2E (fix 2026-07-22): el dispatcher puebla req.form para
+// application/x-www-form-urlencoded — antes llegaba SIEMPRE vacío.
+// Map.get sobre clave ausente ABORTA: contains primero, siempre.
+fn handle_form_demo(req: Request) -> Response {
+    if not req.form.contains("title") {
+        return response_json(400, "{\"error\":\"title is required\"}")
+    }
+    let title: String = req.form.get("title")
+    return response_json(200, "{\"title\":\"" + title + "\"}")
+}
+
+fn handle_redir(req: Request) -> Response {
+    var h: Array = []
+    h.push("Set-Cookie")
+    h.push("sid=abc; Path=/")
+    return Response { status: 302, headers_flat: h, body: "/health" }
+}
+
+// Middleware that continues (status 0) while contributing a header — exercises
+// the fix where a continuing middleware can inject headers into the downstream
+// response instead of having its Response discarded.
+fn mw_visitor(req: Request) -> Response {
+    var h: Array = []
+    h.push("X-Mw")
+    h.push("seen")
+    return Response { status: 0, headers_flat: h, body: "" }
+}
+
+// After-hook that stamps a request id — exercises app_after being wired into
+// the MT dispatcher (basis for access-log / analytics by status).
+fn hook_reqid(req: Request, resp: Response) -> Response {
+    resp.headers_flat.push("X-Request-Id")
+    resp.headers_flat.push("test")
+    return resp
+}
+
+// WebSocket handler registered via app_ws("/ws/echo/{room}", ws_echo_handler)
+// — top-level named fn passed as a Fn arg to an app_ws() IMPORTED from
+// src/server, from the consumer module (examples/standalone.nx). This is
+// deliberately the same cross-module Fn-passing pattern app_get/handle_root
+// already exercises above; here it's used to probe the "Fn cross-module"
+// compiler gap cataloged in the monorepo's TASKS.md for the WS case
+// specifically (see task-3.1-report.md).
+//
+// Does the handshake, reads exactly one frame, echoes it back prefixed with
+// the {room} param (proves param propagation via info[3]), then closes.
+// Returns 1: takes ownership of the fd (server must not touch it again).
+fn ws_echo_handler(info: Array) -> int {
+    let fd: int = info[0]
+    let headers: Array = info[2]
+    let params: Array = info[3]
+
+    let key: String = http_find_header(headers, "Sec-WebSocket-Key")
+    if key.length() == 0 {
+        tcp_write(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        tcp_close(fd)
+        return 1
+    }
+
+    // NOTE: every element read from `params` goes through an intermediate
+    // `let x: String = ...` before use (never inlined into a concat/push/
+    // compare). A bare `arr[i]` inlined into "+" concat or `.push()` reads
+    // as a raw pointer instead of the string content — a gap in the same
+    // family as the documented Map.get/arr[i]-inline fixes (test-224/225),
+    // but not covered by them (those cover binop "==" and typed-fn-arg
+    // propagation; this is untyped `.push()` and "+" concat). Binding to a
+    // typed `let` forces the i64->ptr coercion, the same workaround used
+    // elsewhere in this codebase for inline Map/Array access. See
+    // task-3.1-report.md for the isolated repro.
+    var room: String = "?"
+    var i: int = 0
+    while i + 1 < params.length() {
+        let pk: String = params[i]
+        if pk == "room" {
+            let pv: String = params[i + 1]
+            room = pv
+        }
+        i = i + 2
+    }
+
+    tcp_write(fd, ws_handshake_response(key))
+
+    let data: String = tcp_read_partial(fd, 4096)
+    if data.length() > 0 and !ws_is_close(data) {
+        let payload: String = ws_parse(data)
+        tcp_write(fd, ws_frame(room + ":" + payload))
+    }
+    tcp_write(fd, ws_close())
+    tcp_close(fd)
+    return 1
+}
+
+// Registered via the serve_ws(handler) compat alias (= app_ws("*", handler))
+// to exercise it independently from app_ws's pattern matching. Only used
+// when --ws-catchall is passed (kept out of the default app so the
+// "no WS route matches" 404 case stays testable — a catch-all pattern
+// would otherwise swallow every upgrade request).
+fn ws_legacy_handler(info: Array) -> int {
+    let fd: int = info[0]
+    let headers: Array = info[2]
+    let key: String = http_find_header(headers, "Sec-WebSocket-Key")
+    if key.length() == 0 {
+        tcp_write(fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        tcp_close(fd)
+        return 1
+    }
+    tcp_write(fd, ws_handshake_response(key))
+    tcp_write(fd, ws_frame("legacy-ok"))
+    tcp_write(fd, ws_close())
+    tcp_close(fd)
+    return 1
+}
+
+fn main() {
+    // --port N (default 8080) — lo usa tests/integration/test_serve_kv.py
+    // --ws-catchall — además registra serve_ws(ws_legacy_handler) (alias
+    // app_ws("*", ...)); lo usa test_serve_smoke.py en un daemon aparte
+    // para no romper el check de 404 sin match.
+    var port: int = 8080
+    var ws_catchall: bool = false
+    let args: Array = get_args()
+    var ai: int = 1
+    while ai < args.length() {
+        let arg: String = args[ai]
+        if arg == "--port" and ai + 1 < args.length() {
+            let port_arg: String = args[ai + 1]
+            port = string_to_int(port_arg)
+            ai = ai + 2
+        } else {
+            if arg == "--ws-catchall" {
+                ws_catchall = true
+                ai = ai + 1
+            } else {
+                ai = ai + 1
+            }
+        }
+    }
+
+    let app: App = app_new()
+    app_get(app, "/", handle_root)
+    app_get(app, "/health", handle_health)
+    // alias que usa tests/integration/test_serve_kv.py (contrato del daemon viejo)
+    app_get(app, "/api/health", handle_health)
+    // superficie para los checks de correctness (test_serve_smoke.py)
+    app_get(app, "/redir", handle_redir)
+    // superficie del template engine (Task 3.2), ejercitada por
+    // test_serve_smoke.py (if+each+escape en un solo render).
+    app_get(app, "/template-demo", handle_template_demo)
+    // superficie del multipart parser (Task 3.3), ejercitada por
+    // test_serve_smoke.py con un POST multipart armado a mano en Python.
+    app_post(app, "/multipart-demo", handle_multipart_demo)
+    app_post(app, "/form-demo", handle_form_demo)
+    app_use(app, mw_visitor)
+    app_after(app, hook_reqid)
+    // superficie WS (Task 3.1): patrón con {param}, ejercitado por
+    // test_serve_smoke.py (handshake + eco + 404 sin match).
+    app_ws("/ws/echo/{room}", ws_echo_handler)
+    if ws_catchall {
+        serve_ws(ws_legacy_handler)
+    }
+    print("nyx-serve standalone on :" + int_to_string(port))
+    serve_app(app, port, 4)
+}
