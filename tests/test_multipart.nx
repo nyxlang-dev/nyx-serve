@@ -1,0 +1,124 @@
+// tests/test_multipart.nx — Unit test for src/multipart.nx (nyx-serve
+// multipart/form-data parser).
+//
+// Exercises: single field, field+binary file (payload containing raw
+// \r\n and -- bytes, verified byte-exact), 3 mixed parts, quoted boundary,
+// missing final boundary (degrade, no crash), content-type without a
+// boundary (empty result), a part without filename, and a UTF-8 multibyte
+// value.
+//
+// Compiled+run via `make test-template` / `bash scripts/run_unit_tests.sh`
+// (auto-discovers every tests/*.nx — same pattern as test_template.nx).
+// Each check aborts the whole program via assert() on failure (contract:
+// assert() aborts, see CLAUDE.md) — a clean exit means every check passed.
+
+import "src/multipart"
+
+fn main() {
+    // (a) 1 campo simple.
+    let ct_a: String = "multipart/form-data; boundary=AaB03x"
+    let body_a: String = "--AaB03x\r\nContent-Disposition: form-data; name=\"field1\"\r\n\r\nvalue1\r\n--AaB03x--\r\n"
+    let parts_a: Array = multipart_parse(body_a, ct_a)
+    assert(parts_a.length() == 1)
+    let pa0: Array = parts_a[0]
+    assert(part_name(pa0) == "field1")
+    assert(part_filename(pa0) == "")
+    assert(part_ctype(pa0) == "")
+    assert(part_value(pa0) == "value1")
+
+    // (b) campo + archivo con bytes binarios que incluyen \r\n y "--" en
+    // el contenido — el value debe sobrevivir EXACTO (longitud y bytes).
+    let file_content: String = "AA\r\nBB--CC\r\nDD"
+    let ct_b: String = "multipart/form-data; boundary=AaB03x"
+    let body_b: String = "--AaB03x\r\n" +
+        "Content-Disposition: form-data; name=\"field1\"\r\n\r\n" +
+        "value1\r\n" +
+        "--AaB03x\r\n" +
+        "Content-Disposition: form-data; name=\"file1\"; filename=\"a.bin\"\r\n" +
+        "Content-Type: application/octet-stream\r\n\r\n" +
+        file_content + "\r\n" +
+        "--AaB03x--\r\n"
+    let parts_b: Array = multipart_parse(body_b, ct_b)
+    assert(parts_b.length() == 2)
+    let pb0: Array = parts_b[0]
+    assert(part_name(pb0) == "field1")
+    assert(part_value(pb0) == "value1")
+    let pb1: Array = parts_b[1]
+    assert(part_name(pb1) == "file1")
+    assert(part_filename(pb1) == "a.bin")
+    assert(part_ctype(pb1) == "application/octet-stream")
+    let pb1_val: String = part_value(pb1)
+    assert(pb1_val.length() == file_content.length())
+    assert(pb1_val == file_content)
+
+    // (c) 3 parts mixtos: 2 campos + 1 archivo.
+    let ct_c: String = "multipart/form-data; boundary=Bnd7"
+    let body_c: String = "--Bnd7\r\n" +
+        "Content-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n" +
+        "--Bnd7\r\n" +
+        "Content-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n" +
+        "--Bnd7\r\n" +
+        "Content-Disposition: form-data; name=\"c\"; filename=\"c.txt\"\r\n" +
+        "Content-Type: text/plain\r\n\r\nthree\r\n" +
+        "--Bnd7--\r\n"
+    let parts_c: Array = multipart_parse(body_c, ct_c)
+    assert(parts_c.length() == 3)
+    let pc0: Array = parts_c[0]
+    let pc1: Array = parts_c[1]
+    let pc2: Array = parts_c[2]
+    assert(part_name(pc0) == "a")
+    assert(part_value(pc0) == "1")
+    assert(part_name(pc1) == "b")
+    assert(part_value(pc1) == "2")
+    assert(part_name(pc2) == "c")
+    assert(part_filename(pc2) == "c.txt")
+    assert(part_ctype(pc2) == "text/plain")
+    assert(part_value(pc2) == "three")
+
+    // (d) boundary con comillas en el content-type.
+    let ct_d: String = "multipart/form-data; boundary=\"AaB03x\""
+    let body_d: String = "--AaB03x\r\nContent-Disposition: form-data; name=\"field1\"\r\n\r\nvalue1\r\n--AaB03x--\r\n"
+    let parts_d: Array = multipart_parse(body_d, ct_d)
+    assert(parts_d.length() == 1)
+    let pd0: Array = parts_d[0]
+    assert(part_name(pd0) == "field1")
+    assert(part_value(pd0) == "value1")
+
+    // (e) sin boundary final "--" — degrada: la parte anterior al corte se
+    // parsea igual, sin crash ni loop infinito.
+    let ct_e: String = "multipart/form-data; boundary=AaB03x"
+    let body_e: String = "--AaB03x\r\nContent-Disposition: form-data; name=\"field1\"\r\n\r\nvalue1\r\n--AaB03x\r\n"
+    let parts_e: Array = multipart_parse(body_e, ct_e)
+    assert(parts_e.length() >= 1)
+    let pe0: Array = parts_e[0]
+    assert(part_name(pe0) == "field1")
+    assert(part_value(pe0) == "value1")
+
+    // (f) content_type sin boundary -> Array vacío.
+    let ct_f: String = "multipart/form-data"
+    let parts_f: Array = multipart_parse("--AaB03x\r\n...\r\n--AaB03x--\r\n", ct_f)
+    assert(parts_f.length() == 0)
+
+    // (g) part sin filename (campo de formulario normal) — cubierto también
+    // en (a)/(c), chequeo explícito adicional con multiples campos.
+    let ct_g: String = "multipart/form-data; boundary=G1"
+    let body_g: String = "--G1\r\nContent-Disposition: form-data; name=\"plain\"\r\n\r\nx\r\n--G1--\r\n"
+    let parts_g: Array = multipart_parse(body_g, ct_g)
+    assert(parts_g.length() == 1)
+    let pg0: Array = parts_g[0]
+    assert(part_filename(pg0) == "")
+    assert(part_ctype(pg0) == "")
+
+    // (h) value con UTF-8 multibyte — bytes preservados exacto (strings =
+    // bytes contract, no truncation por char boundaries).
+    let utf8_val: String = "héllo wörld 日本語"
+    let ct_h: String = "multipart/form-data; boundary=H1"
+    let body_h: String = "--H1\r\nContent-Disposition: form-data; name=\"txt\"\r\n\r\n" + utf8_val + "\r\n--H1--\r\n"
+    let parts_h: Array = multipart_parse(body_h, ct_h)
+    assert(parts_h.length() == 1)
+    let ph0: Array = parts_h[0]
+    assert(part_value(ph0) == utf8_val)
+    assert(part_value(ph0).length() == utf8_val.length())
+
+    print("test_multipart: ALL OK")
+}

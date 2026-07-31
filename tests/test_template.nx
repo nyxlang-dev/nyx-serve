@@ -1,0 +1,103 @@
+// tests/test_template.nx — Unit test for src/template.nx (nyx-serve template engine).
+//
+// Exercises: escaped interpolation, raw interpolation, if/else (true+false),
+// each (simple + nested), partial include, partial recursion guard (cuts at
+// depth 8 instead of looping/crashing), and missing-key -> "".
+//
+// Compiled+run via `make test-template` (see Makefile). Each check aborts
+// the whole program via assert() on failure (contract: assert() aborts,
+// see CLAUDE.md) — a clean exit means every check passed.
+
+import "src/template"
+
+fn main() {
+    // 1. Escaped interpolation (default) — {{key}} HTML-escapes.
+    var c1: Map = map_new()
+    c1.insert("name", "<b>Bob</b>")
+    let r1: String = tpl_render("Hello {{name}}!", c1)
+    assert(r1 == "Hello &lt;b&gt;Bob&lt;/b&gt;!")
+
+    // 2. Raw interpolation — {{{key}}} does NOT escape.
+    var c2: Map = map_new()
+    c2.insert("html", "<b>Bob</b>")
+    let r2: String = tpl_render("Raw: {{{html}}}", c2)
+    assert(r2 == "Raw: <b>Bob</b>")
+
+    // 3. Missing key -> "" (both escaped and raw forms).
+    var c3: Map = map_new()
+    let r3: String = tpl_render("[{{missing}}][{{{missing}}}]", c3)
+    assert(r3 == "[][]")
+
+    // 4. if/else — true branch.
+    var c4: Map = map_new()
+    c4.insert("flag", "1")
+    let r4: String = tpl_render("{{#if flag}}YES{{else}}NO{{/if}}", c4)
+    assert(r4 == "YES")
+
+    // 5. if/else — false branch (key absent).
+    var c5: Map = map_new()
+    let r5: String = tpl_render("{{#if flag}}YES{{else}}NO{{/if}}", c5)
+    assert(r5 == "NO")
+
+    // 5b. if/else — falsy values "" and "0" both take the else branch.
+    var c5b: Map = map_new()
+    c5b.insert("flag", "0")
+    let r5b: String = tpl_render("{{#if flag}}YES{{else}}NO{{/if}}", c5b)
+    assert(r5b == "NO")
+
+    // 5c. if without else, false condition -> empty.
+    var c5c: Map = map_new()
+    let r5c: String = tpl_render("[{{#if flag}}YES{{/if}}]", c5c)
+    assert(r5c == "[]")
+
+    // 6. each — simple, one Map per element, escaped interpolation inside.
+    var c6: Map = map_new()
+    var item1: Map = map_new()
+    item1.insert("n", "Ann")
+    var item2: Map = map_new()
+    item2.insert("n", "<Zoe>")
+    var items6: Array = [item1, item2]
+    c6.insert("users", items6)
+    let r6: String = tpl_render("{{#each users}}[{{n}}]{{/each}}", c6)
+    assert(r6 == "[Ann][&lt;Zoe&gt;]")
+
+    // 7. each — nested (each inside each), proves the scanner counts
+    // open/close tags instead of naive replace/first-match.
+    var c7: Map = map_new()
+    var outer1: Map = map_new()
+    var inner1a: Map = map_new()
+    inner1a.insert("v", "a1")
+    var inner1b: Map = map_new()
+    inner1b.insert("v", "a2")
+    var inner1_items: Array = [inner1a, inner1b]
+    outer1.insert("items", inner1_items)
+    var outer2: Map = map_new()
+    var inner2a: Map = map_new()
+    inner2a.insert("v", "b1")
+    var inner2_items: Array = [inner2a]
+    outer2.insert("items", inner2_items)
+    var outer_items: Array = [outer1, outer2]
+    c7.insert("groups", outer_items)
+    let tmpl7: String = "{{#each groups}}(" + "{{#each items}}<{{v}}>{{/each}}" + "){{/each}}"
+    let r7: String = tpl_render(tmpl7, c7)
+    assert(r7 == "(<a1><a2>)(<b1>)")
+
+    // 8. partial — registered then included, rendered with the caller's ctx.
+    tpl_partial("greet", "Hi {{name}}!")
+    var c8: Map = map_new()
+    c8.insert("name", "World")
+    let r8: String = tpl_render("{{> greet}}", c8)
+    assert(r8 == "Hi World!")
+
+    // 9. partial recursion guard — a partial that includes itself must NOT
+    // loop forever or crash; it cuts at MAX_PARTIAL_DEPTH (8) and emits a
+    // literal error marker instead.
+    tpl_partial("loop", "L{{> loop}}")
+    var c9: Map = map_new()
+    let r9: String = tpl_render("{{> loop}}", c9)
+    // 8 levels of "L" before the recursion is cut off.
+    assert(r9.startsWith("LLLLLLLL"))
+    assert(r9.contains("recursion depth exceeded"))
+
+    print("test_template: ALL OK")
+}
