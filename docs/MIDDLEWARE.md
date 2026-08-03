@@ -33,8 +33,8 @@ Before v0.2.2 the `Response` of a continuing middleware was discarded, so header
 
 ```nyx
 app_use(app, mw_cors)      // runs first (handles OPTIONS)
-app_use(app, mw_logging)   // runs second
-app_use(app, my_auth_mw)   // runs third
+app_use(app, my_auth_mw)   // runs second
+app_use(app, my_quota_mw)  // runs third
 ```
 
 ---
@@ -53,14 +53,11 @@ app_use(app, mw_cors)
 
 ### Logging
 
-```nyx
-app_use(app, mw_logging)
-```
-
-`mw_logging` is a **no-op** — it always returns `status: 0` with no headers
-and prints nothing. There is no automatic access logging in nyx-serve today.
-If you need request logging, write your own middleware (see "Request
-Logging with Body" below) or an `app_after` hook that prints `req`/`resp`.
+There is **no** built-in access logging in nyx-serve. (The `mw_logging`
+symbol exported by `std/web` is a dead no-op stub — registering it does
+nothing; don't.) If you need request logging, write your own middleware
+(see "Request Logging with Body" below) or an `app_after` hook that prints
+`req`/`resp`.
 
 ---
 

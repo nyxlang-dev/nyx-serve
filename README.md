@@ -81,9 +81,12 @@ Expected output on startup:
 
 ## Configuration
 
+Flags of the smoke-test binary built from `examples/standalone.nx` (a
+library consumer picks its own port in `serve_app`):
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port <N>` | `3000` | TCP port to listen on |
+| `--port <N>` | `8080` | TCP port to listen on |
 
 Server workers are set programmatically via `serve_app(app, port, workers)`.
 

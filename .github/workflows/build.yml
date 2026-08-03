@@ -1,4 +1,4 @@
-name: Build
+name: Build & Test
 
 on:
   push:
@@ -38,3 +38,9 @@ jobs:
           fi
           echo "✓ Binary $BIN produced successfully"
           ls -lh "./$BIN"
+
+      # The .nx unit tests (make test-template) need the dev bootstrap
+      # toolchain ($NYX_HOME/nyx_bootstrap + runtime sources), which the
+      # public installer does not ship — they run locally via make test-serve.
+      - name: Smoke test (HTTP + WebSocket against ephemeral daemon)
+        run: NYX_SERVE_BIN="$PWD/$(basename "$PWD")" python3 tests/test_serve_smoke.py

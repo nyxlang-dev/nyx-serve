@@ -230,13 +230,10 @@ cors_configure("https://example.com", "GET, POST", "Content-Type, Authorization"
 app_use(app, mw_cors)
 ```
 
-### `mw_logging(req: Request) -> Response`
-
-No-op — always returns `status: 0` (continue) with no headers. There is
-**no** automatic request logging in nyx-serve; this middleware exists as a
-registration slot for future use, but wiring it up today does not print
-anything. To log requests, write your own middleware or `app_after` hook
-(see `docs/MIDDLEWARE.md`).
+> **Note:** there is **no** built-in request-logging middleware. The
+> `mw_logging` symbol exported by `std/web` is a dead no-op stub and should
+> not be registered. To log requests, write your own middleware or an
+> `app_after` hook (see `docs/MIDDLEWARE.md`).
 
 ---
 
