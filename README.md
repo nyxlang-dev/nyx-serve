@@ -12,6 +12,23 @@ cookie sessions y servicio de archivos estáticos. Se consume como dependencia e
 
 ---
 
+## Philosophy
+
+nyx-serve follows the Flask/Werkzeug layering: **power lives in the language**
+(`std/web` owns the vocabulary — `Request`, `Response`, `App`, routing,
+response helpers — and grows capabilities there), while **nyx-serve
+facilitates**: a ready-to-run server, the dispatcher, and the ergonomics for
+building apps, pages and APIs. It wraps the standard library; it never
+replaces it. Framework-layer issues (server, dispatcher, WS, templates,
+static, multipart) belong here; vocabulary gaps belong to the language
+toolchain ([nyxlang.com](https://nyxlang.com)).
+
+**Filosofía**: capas estilo Flask/Werkzeug — el poder vive en el lenguaje
+(`std/web` es dueño del vocabulario y crece allá); nyx-serve facilita
+(servidor listo, dispatcher, ergonomía). Envuelve la stdlib, nunca la
+reemplaza. Issues de framework van acá; huecos de vocabulario, al repo del
+lenguaje.
+
 ## Install
 
 Install the Nyx toolchain:
