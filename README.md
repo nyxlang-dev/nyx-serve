@@ -109,6 +109,19 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Cookie sessions** require a running `nyx-kv` instance (via `std/session.nx`).
 
+## What's new in v0.4.0
+
+- **Registrable error handlers**: `app_not_found(app, handler)` replaces the
+  default 404 page (HTTP and unmatched WebSocket upgrades);
+  `app_error(app, handler)` turns handler panics/throws into a custom 500 —
+  a panicking handler no longer kills the server process. Requires
+  nyx >= 0.24.19.
+
+**Novedades en v0.4.0**: handlers de error registrables — `app_not_found`
+reemplaza la página 404 (HTTP y upgrades WS sin match) y `app_error`
+convierte panics/throws de handlers en un 500 propio: un handler que
+panickea ya no mata el proceso. Requiere nyx >= 0.24.19.
+
 ## What's new in v0.3.0
 
 - **WebSockets** (`app_ws`): route-matched WS upgrade handlers with the same

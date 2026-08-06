@@ -157,3 +157,4 @@ After-hooks run on **every** response path, including redirects and short-circui
 
 - Middlewares/before-hooks can **read** the request but cannot **modify** it before passing it to the next stage (the `Request` struct is passed by value).
 - A continuing (`status: 0`) middleware/before-hook can now contribute **headers** to the eventual response (v0.2.2), but its `body` is still ignored. To rewrite the body or status of an already-resolved response, use an `app_after` hook.
+- A middleware/hook/handler that panics or throws is caught by the dispatcher and turned into a 500 (see `app_error` in API.md) — it no longer kills the process (since v0.4.0).

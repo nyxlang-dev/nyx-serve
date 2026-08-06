@@ -58,6 +58,35 @@ Register a hook that runs **before** middlewares. Same contract as a middleware:
 
 Register a hook that runs **after** the final response is resolved (every path: route, static, short-circuit, 404), before serialization. Receives `(req, resp)` and returns a possibly-modified `Response`. Use for access logs, analytics by status, or stamping headers (e.g. request-id). See `docs/MIDDLEWARE.md`.
 
+### `app_not_found(app: &mut App, handler: Fn(Request) -> Response)`
+
+Replaces the framework's default 404 page. The handler runs for any request
+that matches no route and no static file, and its response goes through
+`app_after` hooks like any other. Also used for WebSocket upgrades that match
+no `app_ws` pattern (formatted directly, without hooks, on that path). The
+`app` at the call site must be declared `var` (registration mutates it
+in place).
+
+### `app_error(app: &mut App, handler: Fn(Request, String) -> Response)`
+
+Runs when any part of the request pipeline (hooks, middleware, route handler,
+static serving) panics or throws: the server catches it, logs
+`[nyx-serve] 500 METHOD PATH: message`, and sends the handler's response
+instead of killing the process. The second argument is the panic/throw
+message — the built-in default (`default_error` from `std/web`) deliberately
+does NOT echo it to the client; echo it in your own handler only if you're
+sure it leaks nothing sensitive. If the custom handler itself panics, the
+built-in 500 page is served. Note: headers contributed by middlewares/before-hooks
+before the panic are NOT carried onto the error response (the error path
+starts a fresh header set).
+
+Note: oversized bodies (`NYX_HTTP_MAX_BODY`, default 1 MiB) are still
+rejected with a built-in 413 before any handler runs — that happens
+pre-parse, with the body undrained and a connection that must close, so it
+is not user-handler territory.
+
+Requires nyx >= 0.24.19.
+
 ---
 
 ## Server
@@ -344,11 +373,13 @@ available) `Last-Modified: <http-date>`. Combine with the automatic ETag
 handling below — `Cache-Control` avoids the re-request, `ETag` validates it
 if one happens anyway.
 
-### `serve_static(app: App, dir: String)`
+### `serve_static(app: &mut App, dir: String)`
 
 Registers a **fallback** static directory: tried only when no route and no
 `app_static`/`app_static_cached` prefix matched. Unlike those, there's no
 URL prefix — the whole `dir` is mounted at `/`.
+
+Fixed in v0.4.0 — previously the registration silently didn't persist (by-value copy).
 
 ### `detect_mime_type(path: String) -> String`
 

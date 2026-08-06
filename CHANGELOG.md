@@ -4,6 +4,25 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.4.0] — 2026-08-06
+
+### Added
+- **Registrable error handlers**: `app_not_found(app, handler)` replaces the
+  default 404 page (HTTP and unmatched WebSocket upgrades); `app_error(app,
+  handler)` turns handler panics/throws into a custom 500 instead of killing
+  the process.
+
+### Fixed
+- `serve_static(app, dir)` now takes `app: &mut App` — previously the
+  registration was silently lost (assigned onto a by-value copy and never
+  persisted).
+
+### Changed
+- The dispatcher's request pipeline (hooks, middleware, route handler,
+  static serving) now runs inside a try/catch: any panic or throw is caught
+  and routed through `app_error` instead of crashing the worker. Requires
+  nyx >= 0.24.19.
+
 ## [0.3.0] — 2026-07-31
 
 ### Added
