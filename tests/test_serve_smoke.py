@@ -214,6 +214,24 @@ def main():
               hdrs_root.get("x-mw") == "seen",
               f"(x-mw {hdrs_root.get('x-mw')!r})")
 
+        # Bloqueador 1 — 404 custom (app_not_found)
+        _, status, body = get(None, "/definitely-not-a-route")
+        check("404 custom (JSON de app_not_found)",
+              status == 404 and b'"error":"not found"' in body
+              and b"/definitely-not-a-route" in body,
+              f"(status {status} body {body[:80]!r})")
+
+        # Bloqueador 1 — panic en handler → 500 custom (app_error), no muerte
+        _, status, body = get(None, "/panic")
+        check("GET /panic → 500 custom via app_error",
+              status == 500 and b"boom-standalone" in body,
+              f"(status {status} body {body[:80]!r})")
+
+        # El check que antes era imposible: el proceso sigue vivo tras el panic
+        _, status, body = get(None, "/health")
+        check("server vivo tras panic (worker no murió)",
+              status == 200 and b"ok" in body, f"(status {status})")
+
         # keep-alive: 2 requests por la misma conexión
         conn, status1, _ = get(None, "/")
         try:
@@ -251,11 +269,27 @@ def main():
         # no un tcp_write crudo).
         s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
         try:
-            _, resp, _ = ws_handshake(s, "/ws/nope")
+            _, resp, ws_nope_body = ws_handshake(s, "/ws/nope")
             check("WS upgrade sin match → 404", resp.startswith(b"HTTP/1.1 404"),
                   f"({resp[:80]!r})")
             check("WS 404 bien formado (Content-Length)",
                   b"Content-Length:" in resp, f"({resp[:120]!r})")
+            # ws_handshake solo devuelve las cabeceras en `resp`; el body
+            # (leftover del mismo recv, o el resto si llegó separado) viaja
+            # en el tercer valor de retorno.
+            cl_match = None
+            for line in resp.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    cl_match = int(line.split(b":", 1)[1].strip())
+            expected_len = cl_match or 0
+            s.settimeout(5)
+            while len(ws_nope_body) < expected_len:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                ws_nope_body += chunk
+            check("WS 404 usa el handler custom", b'"error":"not found"' in ws_nope_body,
+                  f"({ws_nope_body[:120]!r})")
         finally:
             s.close()
 

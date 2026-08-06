@@ -91,6 +91,22 @@ fn handle_form_demo(req: Request) -> Response {
     return response_json(200, "{\"title\":\"" + title + "\"}")
 }
 
+// Superficie del bloqueador 1 (error handlers), ejercitada por
+// test_serve_smoke.py: 404 propio en JSON, /panic que aborta el handler,
+// y app_error que convierte el panic en 500 JSON con el mensaje.
+fn handle_custom_404(req: Request) -> Response {
+    return response_json(404, "{\"error\":\"not found\",\"path\":\"" + req.path + "\"}")
+}
+
+fn handle_custom_error(req: Request, err: String) -> Response {
+    return response_json(500, "{\"error\":\"internal\",\"detail\":\"" + err + "\"}")
+}
+
+fn handle_panic(req: Request) -> Response {
+    panic("boom-standalone")
+    return response_text(500, "unreachable")
+}
+
 fn handle_redir(req: Request) -> Response {
     var h: Array = []
     h.push("Set-Cookie")
@@ -218,7 +234,7 @@ fn main() {
         }
     }
 
-    let app: App = app_new()
+    var app: App = app_new()
     app_get(app, "/", handle_root)
     app_get(app, "/health", handle_health)
     // alias que usa tests/integration/test_serve_kv.py (contrato del daemon viejo)
@@ -232,6 +248,9 @@ fn main() {
     // test_serve_smoke.py con un POST multipart armado a mano en Python.
     app_post(app, "/multipart-demo", handle_multipart_demo)
     app_post(app, "/form-demo", handle_form_demo)
+    app_get(app, "/panic", handle_panic)
+    app_not_found(&mut app, handle_custom_404)
+    app_error(&mut app, handle_custom_error)
     app_use(app, mw_visitor)
     app_after(app, hook_reqid)
     // superficie WS (Task 3.1): patrón con {param}, ejercitado por

@@ -181,7 +181,10 @@ fn __finalize(req: Request, resp: Response, extra_headers: Array) -> String {
     return __format_http_response(r)
 }
 
-// MT handler: converts raw request Array to Request struct and dispatches
+// MT handler: converts raw request Array to Request struct and dispatches.
+// El pipeline corre ENTERO dentro de un try: cualquier panic/throw de un
+// hook/middleware/handler/static/after-hook se convierte en 500 (registrable
+// via app_error) — el proceso no muere jamás por un request.
 fn __serve_mt_dispatch(raw: Array) -> String {
     let method: String = raw[1]
     let path: String = raw[2]
@@ -198,37 +201,57 @@ fn __serve_mt_dispatch(raw: Array) -> String {
     let qp: int = path.indexOf("?")
     if qp >= 0 { clean_path = path.substring(0, qp) }
 
-    // Build Request struct
-    let query: Map = parse_query_string(path)
-    let cookies: Map = parse_cookies(headers)
-    // req.form (fix 2026-07-22, cazado por el tutorial): el dispatcher NUNCA
-    // llamaba a parse_form_data — req.form llegaba SIEMPRE vacío aunque la
-    // doc lo prometía. Se puebla solo para urlencoded (multipart tiene su
-    // helper standalone multipart_parse; JSON va por el body crudo).
-    var form: Map = map_new()
-    if body.length() > 0 {
-        let req_ctype: String = http_find_header(headers, "Content-Type")
-        if req_ctype.indexOf("application/x-www-form-urlencoded") >= 0 {
-            form = parse_form_data(body, req_ctype)
-        }
-    }
-    let params: Map = map_new()
-    var req: Request = Request {
-        method: method,
-        path: clean_path,
-        query: query,
-        headers_flat: headers,
-        body: body,
-        form: form,
-        cookies: cookies,
-        params: params
-    }
+    // Request mínimo antes del try: método+path siempre disponibles para el
+    // error handler aunque el parseo de query/cookies/form panickee.
+    var q0: Map = map_new()
+    var f0: Map = map_new()
+    var c0: Map = map_new()
+    var p0: Map = map_new()
+    var req: Request = Request { method: method, path: clean_path, query: q0, headers_flat: headers, body: body, form: f0, cookies: c0, params: p0 }
 
-    // Accumulates headers contributed by before-hooks / middlewares that
-    // "continue" (status 0), so they reach the downstream response (e.g. a
-    // middleware setting a Set-Cookie while letting the handler run).
     var extra: Array = []
+    try {
+        req.query = parse_query_string(path)
+        req.cookies = parse_cookies(headers)
+        // req.form (fix 2026-07-22, cazado por el tutorial): el dispatcher
+        // NUNCA llamaba a parse_form_data — req.form llegaba SIEMPRE vacío
+        // aunque la doc lo prometía. Se puebla solo para urlencoded
+        // (multipart tiene su helper standalone; JSON va por el body crudo).
+        if body.length() > 0 {
+            let req_ctype: String = http_find_header(headers, "Content-Type")
+            if req_ctype.indexOf("application/x-www-form-urlencoded") >= 0 {
+                req.form = parse_form_data(body, req_ctype)
+            }
+        }
+        return __dispatch_inner(req, extra)
+    } catch(e: String) {
+        print("[nyx-serve] 500 " + method + " " + clean_path + ": " + e)
+        return __error_response(req, e)
+    }
+    // Unreachable: both try/catch branches return above — the toolchain's
+    // return-path checker doesn't (yet) treat a try/catch as exhaustive.
+    return ""
+}
 
+// Camino de error: handler registrable (app_error) con guard propio — si el
+// handler custom (o un after-hook en esta segunda pasada) también panickea,
+// cae al default de std/web formateado directo, sin hooks.
+fn __error_response(req: Request, err: String) -> String {
+    try {
+        let eh: Fn(Request, String) -> Response = __serve_app.error_handler
+        let resp: Response = eh(req, err)
+        var extra2: Array = []
+        return __finalize(req, resp, extra2)
+    } catch(e2: String) {
+        return __format_http_response(default_error(req, e2))
+    }
+    // Unreachable: both try/catch branches return above — same checker gap.
+    return ""
+}
+
+// Cuerpo del pipeline (before-hooks → middlewares → rutas → static → 404).
+// Corre por completo dentro del try de __serve_mt_dispatch.
+fn __dispatch_inner(req: Request, extra: Array) -> String {
     // Run before-hooks first. Contract mirrors middleware: return a Response
     // with status 0 to continue (optionally contributing headers via
     // headers_flat), or a non-zero status to short-circuit the response.
@@ -265,9 +288,9 @@ fn __serve_mt_dispatch(raw: Array) -> String {
     while i < routes.length() {
         let route: Route = routes[i]
         let rm: String = route.method
-        if rm == method {
+        if rm == req.method {
             let rp: String = route.pattern
-            let match_params: Map = route_match(rp, clean_path)
+            let match_params: Map = route_match(rp, req.path)
             if match_params.contains("_matched") {
                 req.params = match_params
                 let cb: Fn(Request) -> Response = route.handler
@@ -281,10 +304,10 @@ fn __serve_mt_dispatch(raw: Array) -> String {
     // If-None-Match is a conditional request header for ETag-based caching;
     // we honor it for static files (routes can use apply_etag themselves if
     // they want the same behavior).
-    let inm: String = http_find_header(headers, "If-None-Match")
+    let inm: String = http_find_header(req.headers_flat, "If-None-Match")
 
     // Try prefix-based static file serving (app_static registrations)
-    let prefix_resp: Response = try_serve_static_prefix(clean_path)
+    let prefix_resp: Response = try_serve_static_prefix(req.path)
     if prefix_resp.status != 0 {
         let tagged: Response = apply_etag(prefix_resp, inm)
         return __finalize(req, tagged, extra)
@@ -293,15 +316,16 @@ fn __serve_mt_dispatch(raw: Array) -> String {
     // Try fallback static file serving (serve_static registration)
     let static_dir: String = __serve_app.static_dir
     if static_dir.length() > 0 {
-        let file_resp: Response = try_serve_static(static_dir, clean_path)
+        let file_resp: Response = try_serve_static(static_dir, req.path)
         if file_resp.status != 0 {
             let tagged: Response = apply_etag(file_resp, inm)
             return __finalize(req, tagged, extra)
         }
     }
 
-    // 404 Not Found
-    let not_found: Response = response_html(404, "<h1>404 Not Found</h1>")
+    // 404 Not Found — registrable (app_not_found; default en std/web)
+    let nf: Fn(Request) -> Response = __serve_app.not_found_handler
+    let not_found: Response = nf(req)
     return __finalize(req, not_found, extra)
 }
 
@@ -363,11 +387,24 @@ fn __serve_ka_worker() -> int {
                         wi = wi + 1
                     }
                     if !matched {
-                        // No WS route matched this path: respond with a
-                        // normal, well-formed 404 via the framework's own
-                        // formatter (not raw tcp_write strings).
-                        let not_found: Response = response_html(404, "<h1>404 Not Found</h1>")
-                        tcp_write(client, __format_http_response(not_found))
+                        // Sin ruta WS para este path: 404 del framework via
+                        // el handler registrable (app_not_found; default en
+                        // std/web), formateado directo — este camino no pasa
+                        // por el dispatcher HTTP ni sus hooks. Guard propio:
+                        // si el handler custom panickea, cae al default.
+                        var wq: Map = map_new()
+                        var wf: Map = map_new()
+                        var wc: Map = map_new()
+                        var wp: Map = map_new()
+                        let wreq: Request = Request { method: "GET", path: clean_path, query: wq, headers_flat: headers, body: "", form: wf, cookies: wc, params: wp }
+                        var wresp: Response = default_not_found(wreq)
+                        try {
+                            let nf: Fn(Request) -> Response = __serve_app.not_found_handler
+                            wresp = nf(wreq)
+                        } catch(we: String) {
+                            wresp = default_not_found(wreq)
+                        }
+                        tcp_write(client, __format_http_response(wresp))
                     }
                     keep_alive = false
                 } else {
