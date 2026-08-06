@@ -243,6 +243,10 @@ fn __error_response(req: Request, err: String) -> String {
         var extra2: Array = []
         return __finalize(req, resp, extra2)
     } catch(e2: String) {
+        // Last-resort floor, intentionally unguarded: default_error and
+        // __format_http_response only format constant strings from std/web,
+        // never user/handler code, so there's nothing left here that can
+        // panic — this is the reliable bottom of the fallback chain.
         return __format_http_response(default_error(req, e2))
     }
     // Unreachable: both try/catch branches return above — same checker gap.

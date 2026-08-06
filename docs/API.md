@@ -377,7 +377,9 @@ if one happens anyway.
 
 Registers a **fallback** static directory: tried only when no route and no
 `app_static`/`app_static_cached` prefix matched. Unlike those, there's no
-URL prefix — the whole `dir` is mounted at `/`.
+URL prefix — the whole `dir` is mounted at `/`. The `app` at the call site
+must be declared `var` and passed as `serve_static(&mut app, dir)` (same
+pattern as `app_not_found` above — registration mutates it in place).
 
 Fixed in v0.4.0 — previously the registration silently didn't persist (by-value copy).
 

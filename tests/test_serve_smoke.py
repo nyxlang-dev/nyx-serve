@@ -283,11 +283,16 @@ def main():
                     cl_match = int(line.split(b":", 1)[1].strip())
             expected_len = cl_match or 0
             s.settimeout(5)
-            while len(ws_nope_body) < expected_len:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                ws_nope_body += chunk
+            try:
+                while len(ws_nope_body) < expected_len:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    ws_nope_body += chunk
+            except socket.timeout:
+                # Server sent fewer bytes than Content-Length promised — stop
+                # reading and let the check below fail cleanly on what we got.
+                pass
             check("WS 404 usa el handler custom", b'"error":"not found"' in ws_nope_body,
                   f"({ws_nope_body[:120]!r})")
         finally:
