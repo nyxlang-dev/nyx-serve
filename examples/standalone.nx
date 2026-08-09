@@ -235,8 +235,12 @@ fn wrap_teapot(req: Request, next: Fn) -> Response {
     return nx(req)
 }
 
-// Router /api: auth propia por header (401 sin token) + ruta con {param}.
-fn api_auth_mw(req: Request) -> Response {
+// Router /priv: auth propia por header (401 sin token) + ruta con {param}.
+// Prefijo /priv (no /api) a propósito: /api ya tiene una ruta concreta del
+// app (/api/health, alias del contrato externo del monorepo) y el mount va
+// ANTES que las rutas del app en el dispatcher — un mount en /api dejaría
+// /api/health detrás del guard de auth de este router.
+fn priv_auth_mw(req: Request) -> Response {
     let tok: String = http_find_header(req.headers_flat, "X-Token")
     if tok != "secreto" {
         return response_json(401, "{\"error\":\"unauthorized\"}")
@@ -245,7 +249,7 @@ fn api_auth_mw(req: Request) -> Response {
     return Response { status: 0, headers_flat: h, body: "" }
 }
 
-fn api_user_handler(req: Request) -> Response {
+fn priv_user_handler(req: Request) -> Response {
     let id: String = req.params.get("id")
     return response_json(200, "{\"user\":\"" + id + "\"}")
 }
@@ -309,10 +313,10 @@ fn main() {
     app_wrap(app, wrap_timing)
     app_wrap(app, wrap_teapot)
 
-    var api_router: Router = router_new()
-    router_use(api_router, api_auth_mw)
-    router_get(api_router, "/users/{id}", api_user_handler)
-    app_mount(app, "/api", api_router)
+    var priv_router: Router = router_new()
+    router_use(priv_router, priv_auth_mw)
+    router_get(priv_router, "/users/{id}", priv_user_handler)
+    app_mount(app, "/priv", priv_router)
 
     var pub_router: Router = router_new()
     router_get(pub_router, "/hello", pub_hello_handler)

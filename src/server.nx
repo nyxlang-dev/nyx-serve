@@ -327,7 +327,7 @@ fn __dispatch_response(req: Request, extra: Array) -> Response {
     return __run_wraps(__serve_app.wraps, 0, req, core)
 }
 
-// Cuerpo del pipeline (before-hooks → middlewares → rutas → mounts → static
+// Cuerpo del pipeline (before-hooks → middlewares → mounts → rutas → static
 // → 404). Devuelve la Response SIN finalizar: los after-hooks y el formateo
 // corren en __serve_mt_dispatch, después de la cadena de wraps.
 fn __core_response(req: Request, extra: Array) -> Response {
@@ -355,36 +355,13 @@ fn __core_response(req: Request, extra: Array) -> Response {
         mi = mi + 1
     }
 
-    // App routes toman prioridad sobre los mounts: un path que matchea una
-    // ruta concreta del app (p.ej. un alias legacy bajo un prefijo que
-    // también está montado) se resuelve ahí, sin entrar al router montado.
-    // Desviación deliberada del orden hooks→mws→MOUNTS→routes propuesto:
-    // con app_get(app, "/api/health", ...) preexistente y app_mount(app,
-    // "/api", ...) nuevo, mounts-antes-que-routes hacía que /api/health
-    // cayera en el router montado (401 sin token) en vez de servir la ruta
-    // legacy — regresión real contra el contrato externo de
-    // tests/integration/test_serve_kv.py (monorepo). Documentado en
-    // task-3-report.md.
-    let routes: Array = __serve_app.routes
-    var i: int = 0
-    while i < routes.length() {
-        let route: Route = routes[i]
-        let rm: String = route.method
-        if rm == req.method {
-            let rp: String = route.pattern
-            let match_params: Map = route_match(rp, req.path)
-            if match_params.contains("_matched") {
-                req.params = match_params
-                let cb: Fn(Request) -> Response = route.handler
-                return cb(req)
-            }
-        }
-        i = i + 1
-    }
-
-    // Mounts: primer prefijo que matchea (orden de registro). El router ve
-    // el path SIN el prefijo; si no maneja el request (sentinel status 0),
-    // FALL-THROUGH: el pipeline del app continúa (static → 404).
+    // Mounts van ANTES que las rutas del app, a propósito: montar auth (u
+    // otro wrap/middleware) sobre un prefijo debe proteger TODO ese
+    // prefijo, sin que una ruta concreta del app registrada por debajo
+    // pueda bypasear el guard del mount. El router ve el path SIN el
+    // prefijo; si no maneja el request (sentinel status 0), FALL-THROUGH:
+    // el pipeline del app sigue con el path original (rutas → static →
+    // 404). Primer prefijo que matchea, en orden de registro.
     let mounts: Array = __serve_app.mounts
     var mo: int = 0
     while mo < mounts.length() {
@@ -401,6 +378,23 @@ fn __core_response(req: Request, extra: Array) -> Response {
             }
         }
         mo = mo + 1
+    }
+
+    let routes: Array = __serve_app.routes
+    var i: int = 0
+    while i < routes.length() {
+        let route: Route = routes[i]
+        let rm: String = route.method
+        if rm == req.method {
+            let rp: String = route.pattern
+            let match_params: Map = route_match(rp, req.path)
+            if match_params.contains("_matched") {
+                req.params = match_params
+                let cb: Fn(Request) -> Response = route.handler
+                return cb(req)
+            }
+        }
+        i = i + 1
     }
 
     // If-None-Match is a conditional request header for ETag-based caching;

@@ -388,17 +388,17 @@ def main():
         check("composicion onion: 418 con X-Elapsed-Us",
               tp_elapsed is not None, f"({tp_elapsed!r})")
 
-        # Bloqueador 2 — mount /api con auth propia
-        _, status, body = get(None, "/api/users/7")
-        check("mount /api sin token → 401", status == 401, f"(status {status})")
+        # Bloqueador 2 — mount /priv con auth propia
+        _, status, body = get(None, "/priv/users/7")
+        check("mount /priv sin token → 401", status == 401, f"(status {status})")
 
         conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
-        conn.request("GET", "/api/users/7", headers={"X-Token": "secreto"})
+        conn.request("GET", "/priv/users/7", headers={"X-Token": "secreto"})
         resp = conn.getresponse()
         au_status = resp.status
         au_body = resp.read()
         conn.close()
-        check("mount /api con token → 200 con {id} del router",
+        check("mount /priv con token → 200 con {id} del router",
               au_status == 200 and b'"user":"7"' in au_body,
               f"(status {au_status} body {au_body[:60]!r})")
 
