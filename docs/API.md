@@ -76,7 +76,9 @@ Calling `next` more than once re-executes the rest of the chain: defined, but
 don't. Headers contributed by continuing status-0 middlewares are merged
 *after* the wrap chain (wraps don't see them), and `app_after` hooks plus
 response formatting also run outside the wraps. Wraps do not apply to
-WebSocket upgrades.
+WebSocket upgrades. Returning a `status: 0` response from an *app-level*
+wrap is invalid (the sentinel is only meaningful inside routers) — the
+response would be formatted as-is; don't.
 
 Requires nyx >= 0.24.24.
 
@@ -95,7 +97,9 @@ app_mount(app, "/api", api)
 A `Router` carries its own routes (`router_get/post/put/delete/route`),
 status-0 middlewares and wraps. `app_mount(app, prefix, router)` mounts it
 under a literal prefix (no `{param}` in prefixes; a trailing `/` is
-normalized away). `/api` matches `/api` and `/api/...`; route patterns inside
+normalized away). Mount prefixes must be non-root (`app_mount(app, "/", ...)`
+only ever matches the literal `/` path). `/api` matches `/api` and
+`/api/...`; route patterns inside
 the router match against the path with the prefix stripped (`/api/users/3` →
 `/users/3`, bare `/api` → `/`). Mounts are tried in registration order; the
 first whose prefix matches **and** whose router handles the request wins —
@@ -112,8 +116,10 @@ the router's middlewares continue and no router route matches).
 matches, the request falls through to the app's own routes, static files and
 404 — a mount does not capture its prefix. A router wrap whose `next`
 returns a `status: 0` response is seeing that fall-through sentinel and must
-return it unchanged. Mounts do not apply to WebSocket upgrades, and routers
-have no per-router static file serving.
+return it unchanged. Headers contributed by a router's continuing status-0
+middlewares persist even when the router falls through — they are merged
+into whatever response the request ultimately produces. Mounts do not apply
+to WebSocket upgrades, and routers have no per-router static file serving.
 
 Requires nyx >= 0.24.24.
 
@@ -126,7 +132,8 @@ that matches no route and no static file, and its response goes through
 `app_after` hooks like any other. Also used for WebSocket upgrades that match
 no `app_ws` pattern (formatted directly, without hooks, on that path). The
 `app` at the call site must be declared `var` (registration mutates it
-in place).
+in place). `app_after` hooks receive the original `Request` the server
+built — not a modified one a wrap may have passed down via `next`.
 
 ### `app_error(app: &mut App, handler: Fn(Request, String) -> Response)`
 

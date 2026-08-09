@@ -259,6 +259,28 @@ fn pub_hello_handler(req: Request) -> Response {
     return response_json(200, "{\"pub\":\"hello\"}")
 }
 
+// Ruta real del app bajo el prefijo /pub (Task 2): con la precedencia
+// mounts-first el request pasa primero por pub_router (sin match interno →
+// sentinel status 0) y recién después matchea esta ruta del app — prueba
+// que el fall-through aterriza con el path ORIGINAL restaurado, no el
+// despojado por el mount.
+fn handle_pub_extra(req: Request) -> Response {
+    return response_json(200, "{\"app\":\"extra\"}")
+}
+
+// Router-wrap de pub: estampa un header al salir. Contrato del sentinel:
+// un status 0 de next es el fall-through del router — se devuelve intacto.
+fn pub_stamp_wrap(req: Request, next: Fn) -> Response {
+    let nx: Fn(Request) -> Response = next
+    var resp: Response = nx(req)
+    if resp.status == 0 {
+        return resp
+    }
+    resp.headers_flat.push("X-Pub-Wrap")
+    resp.headers_flat.push("1")
+    return resp
+}
+
 fn main() {
     // --port N (default 8080) — lo usa tests/integration/test_serve_kv.py
     // --ws-catchall — además registra serve_ws(ws_legacy_handler) (alias
@@ -299,6 +321,8 @@ fn main() {
     app_post(app, "/multipart-demo", handle_multipart_demo)
     app_post(app, "/form-demo", handle_form_demo)
     app_get(app, "/panic", handle_panic)
+    // ruta real del app bajo el prefijo mounted /pub — ver handle_pub_extra
+    app_get(app, "/pub/extra", handle_pub_extra)
     app_not_found(&mut app, handle_custom_404)
     app_error(&mut app, handle_custom_error)
     app_use(app, mw_visitor)
@@ -320,6 +344,7 @@ fn main() {
 
     var pub_router: Router = router_new()
     router_get(pub_router, "/hello", pub_hello_handler)
+    router_wrap(pub_router, pub_stamp_wrap)
     app_mount(app, "/pub", pub_router)
 
     print("nyx-serve standalone on :" + int_to_string(port))

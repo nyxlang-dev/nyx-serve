@@ -410,6 +410,38 @@ def main():
         check("fall-through: /pub/no-existe → 404 custom del app",
               status == 404 and b'"error":"not found"' in body,
               f"(status {status} body {body[:60]!r})")
+
+        # Bloqueador 2 — router_wrap de /pub: estampa header al salir, pero
+        # respeta el sentinel status 0 en el fall-through (no lo toca).
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/pub/hello")
+        resp = conn.getresponse()
+        rw_status = resp.status
+        rw_header = resp.getheader("X-Pub-Wrap")
+        resp.read()
+        conn.close()
+        check("router_wrap /pub: /pub/hello → 200 con X-Pub-Wrap",
+              rw_status == 200 and rw_header == "1",
+              f"(status {rw_status} header {rw_header!r})")
+
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/pub/no-existe")
+        resp = conn.getresponse()
+        rwnf_status = resp.status
+        rwnf_header = resp.getheader("X-Pub-Wrap")
+        resp.read()
+        conn.close()
+        check("router_wrap /pub: fall-through a 404 sin X-Pub-Wrap (sentinel intacto)",
+              rwnf_status == 404 and rwnf_header is None,
+              f"(status {rwnf_status} header {rwnf_header!r})")
+
+        # Bloqueador 2 — fall-through a una ruta REAL del app bajo el
+        # prefijo mounted /pub: prueba que el path original (no el
+        # despojado por el mount) es el que matchea.
+        _, status, body = get(None, "/pub/extra")
+        check("fall-through a ruta real del app bajo /pub (path original preservado)",
+              status == 200 and b'"app":"extra"' in body,
+              f"(status {status} body {body[:60]!r})")
     finally:
         stop_daemon(proc)
 
