@@ -365,6 +365,51 @@ def main():
             check("413 cierra la conexion", tail == b"", f"(tail {tail[:40]!r})")
         finally:
             s.close()
+        # Bloqueador 2 — wrap global de timing: toda respuesta lleva X-Elapsed-Us
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/health")
+        resp = conn.getresponse()
+        elapsed = resp.getheader("X-Elapsed-Us")
+        resp.read()
+        conn.close()
+        check("wrap timing: X-Elapsed-Us presente y numerico",
+              elapsed is not None and elapsed.isdigit(), f"({elapsed!r})")
+
+        # Bloqueador 2 — short-circuit + composicion onion: el 418 del wrap
+        # interno sale envuelto por el timing (header presente igual)
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/teapot")
+        resp = conn.getresponse()
+        tp_status = resp.status
+        tp_elapsed = resp.getheader("X-Elapsed-Us")
+        tp_body = resp.read()
+        conn.close()
+        check("wrap short-circuit → 418", tp_status == 418, f"(status {tp_status})")
+        check("composicion onion: 418 con X-Elapsed-Us",
+              tp_elapsed is not None, f"({tp_elapsed!r})")
+
+        # Bloqueador 2 — mount /api con auth propia
+        _, status, body = get(None, "/api/users/7")
+        check("mount /api sin token → 401", status == 401, f"(status {status})")
+
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/api/users/7", headers={"X-Token": "secreto"})
+        resp = conn.getresponse()
+        au_status = resp.status
+        au_body = resp.read()
+        conn.close()
+        check("mount /api con token → 200 con {id} del router",
+              au_status == 200 and b'"user":"7"' in au_body,
+              f"(status {au_status} body {au_body[:60]!r})")
+
+        # Bloqueador 2 — router sin auth + fall-through al 404 del APP
+        _, status, body = get(None, "/pub/hello")
+        check("mount /pub → 200", status == 200 and b'"pub":"hello"' in body,
+              f"(status {status})")
+        _, status, body = get(None, "/pub/no-existe")
+        check("fall-through: /pub/no-existe → 404 custom del app",
+              status == 404 and b'"error":"not found"' in body,
+              f"(status {status} body {body[:60]!r})")
     finally:
         stop_daemon(proc)
 

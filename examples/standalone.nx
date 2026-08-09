@@ -209,6 +209,52 @@ fn ws_legacy_handler(info: Array) -> int {
     return 1
 }
 
+// ── Superficie del bloqueador 2 (wraps + routers), ejercitada por el smoke ──
+
+// Wrap global de timing: envuelve TODO (hooks, mws, mounts, rutas, static,
+// 404) y estampa la duración en la respuesta — la prueba del "antes y
+// después con estado compartido" que el modelo status-0 no podía expresar.
+fn wrap_timing(req: Request, next: Fn) -> Response {
+    let t0: int = time_us()
+    let nx: Fn(Request) -> Response = next
+    var resp: Response = nx(req)
+    let dt: int = time_us() - t0
+    resp.headers_flat.push("X-Elapsed-Us")
+    resp.headers_flat.push(int_to_string(dt))
+    return resp
+}
+
+// Wrap de short-circuit: responde sin llamar next para un path fijo.
+// Registrado DESPUÉS de wrap_timing → su 418 igual sale con X-Elapsed-Us
+// (composición onion: timing lo envuelve).
+fn wrap_teapot(req: Request, next: Fn) -> Response {
+    if req.path == "/teapot" {
+        return response_json(418, "{\"error\":\"I'm a teapot\"}")
+    }
+    let nx: Fn(Request) -> Response = next
+    return nx(req)
+}
+
+// Router /api: auth propia por header (401 sin token) + ruta con {param}.
+fn api_auth_mw(req: Request) -> Response {
+    let tok: String = http_find_header(req.headers_flat, "X-Token")
+    if tok != "secreto" {
+        return response_json(401, "{\"error\":\"unauthorized\"}")
+    }
+    var h: Array = []
+    return Response { status: 0, headers_flat: h, body: "" }
+}
+
+fn api_user_handler(req: Request) -> Response {
+    let id: String = req.params.get("id")
+    return response_json(200, "{\"user\":\"" + id + "\"}")
+}
+
+// Router /pub: sin auth — para verificar fall-through al 404 del app.
+fn pub_hello_handler(req: Request) -> Response {
+    return response_json(200, "{\"pub\":\"hello\"}")
+}
+
 fn main() {
     // --port N (default 8080) — lo usa tests/integration/test_serve_kv.py
     // --ws-catchall — además registra serve_ws(ws_legacy_handler) (alias
@@ -259,6 +305,19 @@ fn main() {
     if ws_catchall {
         serve_ws(ws_legacy_handler)
     }
+
+    app_wrap(app, wrap_timing)
+    app_wrap(app, wrap_teapot)
+
+    var api_router: Router = router_new()
+    router_use(api_router, api_auth_mw)
+    router_get(api_router, "/users/{id}", api_user_handler)
+    app_mount(app, "/api", api_router)
+
+    var pub_router: Router = router_new()
+    router_get(pub_router, "/hello", pub_hello_handler)
+    app_mount(app, "/pub", pub_router)
+
     print("nyx-serve standalone on :" + int_to_string(port))
     serve_app(app, port, 4)
 }

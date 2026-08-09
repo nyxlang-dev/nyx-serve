@@ -223,7 +223,8 @@ fn __serve_mt_dispatch(raw: Array) -> String {
                 req.form = parse_form_data(body, req_ctype)
             }
         }
-        return __dispatch_inner(req, extra)
+        let resp: Response = __dispatch_response(req, extra)
+        return __finalize(req, resp, extra)
     } catch(e: String) {
         print("[nyx-serve] 500 " + method + " " + clean_path + ": " + e)
         return __error_response(req, e)
@@ -253,40 +254,117 @@ fn __error_response(req: Request, err: String) -> String {
     return ""
 }
 
-// Cuerpo del pipeline (before-hooks → middlewares → rutas → static → 404).
-// Corre por completo dentro del try de __serve_mt_dispatch.
-fn __dispatch_inner(req: Request, extra: Array) -> String {
-    // Run before-hooks first. Contract mirrors middleware: return a Response
-    // with status 0 to continue (optionally contributing headers via
-    // headers_flat), or a non-zero status to short-circuit the response.
+// Motor de la cadena de wraps (contrato: Fn(Request, Fn) -> Response, con
+// next: Fn(Request) -> Response). Recursión vía esta fn de módulo; el next
+// es una fn anidada que captura (wraps, i, core) — patrón fijado por el
+// test-337 del lenguaje. Índice fuera de rango → llama al core.
+fn __run_wraps(wraps: Array, i: int, req: Request, core: Fn) -> Response {
+    if i >= wraps.length() {
+        let c: Fn(Request) -> Response = core
+        return c(req)
+    }
+    let w: Fn(Request, Fn) -> Response = wraps[i]
+    fn next_fn(r: Request) -> Response {
+        return __run_wraps(wraps, i + 1, r, core)
+    }
+    let nx: Fn = next_fn
+    return w(req, nx)
+}
+
+// Cadena de un router montado: sus wraps envuelven (mws status-0 → rutas).
+// Devuelve status 0 (sentinel) si el router no manejó el request →
+// fall-through. Un router-wrap que recibe un status 0 de su next debe
+// devolverlo sin tocar (documentado en API.md).
+fn __router_core(router: Router, req: Request, extra: Array) -> Response {
+    let middlewares: Array = router.middlewares
+    var mi: int = 0
+    while mi < middlewares.length() {
+        let mw: Fn(Request) -> Response = middlewares[mi]
+        let mw_resp: Response = mw(req)
+        if mw_resp.status != 0 {
+            return mw_resp
+        }
+        __collect_headers(extra, mw_resp.headers_flat)
+        mi = mi + 1
+    }
+
+    let routes: Array = router.routes
+    var i: int = 0
+    while i < routes.length() {
+        let route: Route = routes[i]
+        let rm: String = route.method
+        if rm == req.method {
+            let rp: String = route.pattern
+            let match_params: Map = route_match(rp, req.path)
+            if match_params.contains("_matched") {
+                req.params = match_params
+                let cb: Fn(Request) -> Response = route.handler
+                return cb(req)
+            }
+        }
+        i = i + 1
+    }
+
+    // Sin match interno: sentinel de fall-through.
+    var hf: Array = []
+    return Response { status: 0, headers_flat: hf, body: "" }
+}
+
+fn __mount_response(router: Router, req: Request, extra: Array) -> Response {
+    fn rcore_fn(r: Request) -> Response {
+        return __router_core(router, r, extra)
+    }
+    let rc: Fn = rcore_fn
+    return __run_wraps(router.wraps, 0, req, rc)
+}
+
+// Cadena a nivel app: app wraps envolviendo el core completo.
+fn __dispatch_response(req: Request, extra: Array) -> Response {
+    fn core_fn(r: Request) -> Response {
+        return __core_response(r, extra)
+    }
+    let core: Fn = core_fn
+    return __run_wraps(__serve_app.wraps, 0, req, core)
+}
+
+// Cuerpo del pipeline (before-hooks → middlewares → rutas → mounts → static
+// → 404). Devuelve la Response SIN finalizar: los after-hooks y el formateo
+// corren en __serve_mt_dispatch, después de la cadena de wraps.
+fn __core_response(req: Request, extra: Array) -> Response {
     let before_hooks: Array = __serve_app.before_hooks
     var bi: int = 0
     while bi < before_hooks.length() {
         let hook: Fn(Request) -> Response = before_hooks[bi]
         let hook_resp: Response = hook(req)
         if hook_resp.status != 0 {
-            return __finalize(req, hook_resp, extra)
+            return hook_resp
         }
         __collect_headers(extra, hook_resp.headers_flat)
         bi = bi + 1
     }
 
-    // Run middlewares
     let middlewares: Array = __serve_app.middlewares
     var mi: int = 0
     while mi < middlewares.length() {
         let mw: Fn(Request) -> Response = middlewares[mi]
         let mw_resp: Response = mw(req)
         if mw_resp.status != 0 {
-            // Middleware short-circuited (e.g. CORS OPTIONS, rate limit)
-            return __finalize(req, mw_resp, extra)
+            return mw_resp
         }
-        // Continued (status 0): carry its headers to the downstream response
         __collect_headers(extra, mw_resp.headers_flat)
         mi = mi + 1
     }
 
-    // Try each route
+    // App routes toman prioridad sobre los mounts: un path que matchea una
+    // ruta concreta del app (p.ej. un alias legacy bajo un prefijo que
+    // también está montado) se resuelve ahí, sin entrar al router montado.
+    // Desviación deliberada del orden hooks→mws→MOUNTS→routes propuesto:
+    // con app_get(app, "/api/health", ...) preexistente y app_mount(app,
+    // "/api", ...) nuevo, mounts-antes-que-routes hacía que /api/health
+    // cayera en el router montado (401 sin token) en vez de servir la ruta
+    // legacy — regresión real contra el contrato externo de
+    // tests/integration/test_serve_kv.py (monorepo). Documentado en
+    // task-3-report.md.
     let routes: Array = __serve_app.routes
     var i: int = 0
     while i < routes.length() {
@@ -298,11 +376,31 @@ fn __dispatch_inner(req: Request, extra: Array) -> String {
             if match_params.contains("_matched") {
                 req.params = match_params
                 let cb: Fn(Request) -> Response = route.handler
-                let resp: Response = cb(req)
-                return __finalize(req, resp, extra)
+                return cb(req)
             }
         }
         i = i + 1
+    }
+
+    // Mounts: primer prefijo que matchea (orden de registro). El router ve
+    // el path SIN el prefijo; si no maneja el request (sentinel status 0),
+    // FALL-THROUGH: el pipeline del app continúa (static → 404).
+    let mounts: Array = __serve_app.mounts
+    var mo: int = 0
+    while mo < mounts.length() {
+        let m: Mount = mounts[mo]
+        let pfx: String = m.prefix
+        if req.path == pfx or req.path.startsWith(pfx + "/") {
+            var sub: String = req.path.substring(pfx.length(), req.path.length())
+            if sub.length() == 0 { sub = "/" }
+            var sreq: Request = req
+            sreq.path = sub
+            let rresp: Response = __mount_response(m.router, sreq, extra)
+            if rresp.status != 0 {
+                return rresp
+            }
+        }
+        mo = mo + 1
     }
 
     // If-None-Match is a conditional request header for ETag-based caching;
@@ -313,8 +411,7 @@ fn __dispatch_inner(req: Request, extra: Array) -> String {
     // Try prefix-based static file serving (app_static registrations)
     let prefix_resp: Response = try_serve_static_prefix(req.path)
     if prefix_resp.status != 0 {
-        let tagged: Response = apply_etag(prefix_resp, inm)
-        return __finalize(req, tagged, extra)
+        return apply_etag(prefix_resp, inm)
     }
 
     // Try fallback static file serving (serve_static registration)
@@ -322,15 +419,13 @@ fn __dispatch_inner(req: Request, extra: Array) -> String {
     if static_dir.length() > 0 {
         let file_resp: Response = try_serve_static(static_dir, req.path)
         if file_resp.status != 0 {
-            let tagged: Response = apply_etag(file_resp, inm)
-            return __finalize(req, tagged, extra)
+            return apply_etag(file_resp, inm)
         }
     }
 
     // 404 Not Found — registrable (app_not_found; default en std/web)
     let nf: Fn(Request) -> Response = __serve_app.not_found_handler
-    let not_found: Response = nf(req)
-    return __finalize(req, not_found, extra)
+    return nf(req)
 }
 
 // Global channel for dispatching client fds to keep-alive workers
