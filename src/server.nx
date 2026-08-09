@@ -256,8 +256,9 @@ fn __error_response(req: Request, err: String) -> String {
 
 // Motor de la cadena de wraps (contrato: Fn(Request, Fn) -> Response, con
 // next: Fn(Request) -> Response). Recursión vía esta fn de módulo; el next
-// es una fn anidada que captura (wraps, i, core) — patrón fijado por el
-// test-337 del lenguaje. Índice fuera de rango → llama al core.
+// es una fn anidada que captura (wraps, i, core) — patrón fijado por
+// test-339-wrap-next-closure de la suite del toolchain. Índice fuera de
+// rango → llama al core.
 fn __run_wraps(wraps: Array, i: int, req: Request, core: Fn) -> Response {
     if i >= wraps.length() {
         let c: Fn(Request) -> Response = core
