@@ -22,6 +22,10 @@ from the Nyx language toolchain.
   matches, the request falls through to the app's own routes, static files
   and 404 (a mount does not capture its prefix); a router wrap seeing a
   `status: 0` fall-through sentinel from `next` must return it unchanged.
+  Mounts are tried in registration order; the first whose prefix matches
+  and whose router handles the request wins — a mount that falls through
+  lets a later matching mount (or, failing that, the app's own routes)
+  take over.
 
 ### Changed
 - Dispatcher restructured as an onion chain: `app_wrap`s are now the

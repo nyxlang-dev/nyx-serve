@@ -97,8 +97,10 @@ status-0 middlewares and wraps. `app_mount(app, prefix, router)` mounts it
 under a literal prefix (no `{param}` in prefixes; a trailing `/` is
 normalized away). `/api` matches `/api` and `/api/...`; route patterns inside
 the router match against the path with the prefix stripped (`/api/users/3` →
-`/users/3`, bare `/api` → `/`). The first mount whose prefix matches wins
-(registration order).
+`/users/3`, bare `/api` → `/`). Mounts are tried in registration order; the
+first whose prefix matches **and** whose router handles the request wins —
+a mount that falls through lets a later matching mount (or, failing that,
+the app's own routes) take over.
 
 **Precedence (mounts vs. the app's own routes):** mounts are checked
 **before** the app's own routes: a mount's middleware guards its entire
