@@ -109,6 +109,28 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Cookie sessions** require a running `nyx-kv` instance (via `std/session.nx`).
 
+## What's new in v0.5.0
+
+- **Wrapping middleware** (`app_wrap(app, mw)`, `mw: Fn(Request, Fn) -> Response`):
+  runs *around* the rest of the pipeline instead of only before it — call
+  `next(req)` to run everything downstream and get its `Response` back, so a
+  wrap can time, cache, or modify the response, not just short-circuit or add
+  headers. Wraps compose onion-style in registration order (first registered
+  is outermost).
+- **Mountable routers** (`router_new`, `router_get`/`post`/`put`/`delete`/
+  `route`, `router_use`, `router_wrap`, `app_mount(app, prefix, router)`): a
+  `Router` carries its own routes, status-0 middlewares and wraps, scoped
+  under a literal path prefix. Mounts are checked before the app's own
+  routes, and fall through to them (then static files, then 404) when the
+  router doesn't handle the request. Requires nyx >= 0.24.24.
+
+**Novedades en v0.5.0**: middleware envolvente (`app_wrap`, con `next` para
+correr el resto del pipeline y ver/modificar la `Response`, no solo cortar o
+agregar headers) y routers montables (`Router`, `router_get`/`use`/`wrap`,
+`app_mount`) con su propio stack de rutas/middlewares/wraps bajo un prefijo,
+chequeados antes que las rutas del app y con fall-through si no matchean.
+Requiere nyx >= 0.24.24.
+
 ## What's new in v0.4.0
 
 - **Registrable error handlers**: `app_not_found(app, handler)` replaces the
@@ -170,6 +192,8 @@ redirects 3xx.
 - Requests over `NYX_HTTP_MAX_BODY` (default 1 MiB) are rejected with an
   automatic `413` before the handler ever sees them — there's no per-route
   override
+- Mounts/wraps do not apply to WebSocket upgrades; no per-router static
+  serving
 
 ## License
 

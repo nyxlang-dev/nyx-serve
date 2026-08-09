@@ -4,6 +4,37 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.5.0] — 2026-08-09
+
+### Added
+- **Wrapping middleware**: `app_wrap(app, mw)` and `router_wrap(router, mw)`
+  (`mw: Fn(Request, Fn) -> Response`) — runs around the rest of the
+  pipeline, not just before it; calling `next(req)` runs everything
+  downstream (hooks, status-0 middlewares, mounts, routes, static files, the
+  404) and returns its `Response`, so a wrap can time, cache, or rewrite the
+  response, or skip `next` entirely to short-circuit. Wraps compose
+  onion-style in registration order.
+- **Mountable routers**: `Router` / `router_new` / `router_get`/`post`/
+  `put`/`delete`/`route` / `router_use` / `router_wrap` / `app_mount(app,
+  prefix, router)` — a `Router` carries its own routes, status-0
+  middlewares and wraps scoped under a literal path prefix. Fall-through
+  semantics: if the router's middlewares continue and no internal route
+  matches, the request falls through to the app's own routes, static files
+  and 404 (a mount does not capture its prefix); a router wrap seeing a
+  `status: 0` fall-through sentinel from `next` must return it unchanged.
+
+### Changed
+- Dispatcher restructured as an onion chain: `app_wrap`s are now the
+  outermost layer, wrapping the full before-hooks → status-0 middlewares →
+  mounts → routes → static → 404 pipeline. Mounts are checked **before**
+  the app's own routes — a mount's middleware guards its entire prefix, so
+  a concrete app route registered under a mounted prefix cannot bypass it
+  (only reachable via fall-through).
+- Internal request pipeline now resolves a `Response` before formatting
+  (after-hooks and HTTP serialization run once, outside the wrap chain,
+  instead of being interleaved per return path).
+- Requires nyx >= 0.24.24.
+
 ## [0.4.0] — 2026-08-06
 
 ### Added

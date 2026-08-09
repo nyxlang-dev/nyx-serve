@@ -58,6 +58,65 @@ Register a hook that runs **before** middlewares. Same contract as a middleware:
 
 Register a hook that runs **after** the final response is resolved (every path: route, static, short-circuit, 404), before serialization. Receives `(req, resp)` and returns a possibly-modified `Response`. Use for access logs, analytics by status, or stamping headers (e.g. request-id). See `docs/MIDDLEWARE.md`.
 
+### `app_wrap`
+
+```nyx
+app_wrap(app, mw)   // mw: Fn(Request, Fn) -> Response
+```
+
+Registers a wrapping middleware. Unlike `app_use` middlewares (which run
+before the handler and can only short-circuit or contribute headers), a wrap
+runs *around* everything downstream: the second argument is
+`next: Fn(Request) -> Response` — calling it runs the rest of the chain
+(hooks, status-0 middlewares, mounted routers, routes, static files, the 404)
+and returns its `Response`. A wrap can time around `next`, modify the returned
+response, skip `next` entirely (short-circuit), or pass a modified `Request`
+down. Wraps run in registration order — the first registered is outermost.
+Calling `next` more than once re-executes the rest of the chain: defined, but
+don't. Headers contributed by continuing status-0 middlewares are merged
+*after* the wrap chain (wraps don't see them), and `app_after` hooks plus
+response formatting also run outside the wraps. Wraps do not apply to
+WebSocket upgrades.
+
+Requires nyx >= 0.24.24.
+
+---
+
+### Routers (router_new / router_get / router_use / router_wrap / app_mount)
+
+```nyx
+var api: Router = router_new()
+router_use(api, my_auth_mw)          // status-0 middleware, scoped
+router_wrap(api, my_tracing_wrap)    // wrapping middleware, scoped
+router_get(api, "/users/{id}", handler)
+app_mount(app, "/api", api)
+```
+
+A `Router` carries its own routes (`router_get/post/put/delete/route`),
+status-0 middlewares and wraps. `app_mount(app, prefix, router)` mounts it
+under a literal prefix (no `{param}` in prefixes; a trailing `/` is
+normalized away). `/api` matches `/api` and `/api/...`; route patterns inside
+the router match against the path with the prefix stripped (`/api/users/3` →
+`/users/3`, bare `/api` → `/`). The first mount whose prefix matches wins
+(registration order).
+
+**Precedence (mounts vs. the app's own routes):** mounts are checked
+**before** the app's own routes: a mount's middleware guards its entire
+prefix — a concrete app route registered under a mounted prefix cannot
+bypass the mount's middleware, and is only reachable via fall-through (when
+the router's middlewares continue and no router route matches).
+
+**Fall-through:** if the router's middlewares continue and no internal route
+matches, the request falls through to the app's own routes, static files and
+404 — a mount does not capture its prefix. A router wrap whose `next`
+returns a `status: 0` response is seeing that fall-through sentinel and must
+return it unchanged. Mounts do not apply to WebSocket upgrades, and routers
+have no per-router static file serving.
+
+Requires nyx >= 0.24.24.
+
+---
+
 ### `app_not_found(app: &mut App, handler: Fn(Request) -> Response)`
 
 Replaces the framework's default 404 page. The handler runs for any request
