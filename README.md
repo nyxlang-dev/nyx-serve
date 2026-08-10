@@ -114,9 +114,11 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 - **Graceful shutdown**: `serve_app` now handles `SIGTERM` — closes the
   listener immediately (waking the accept loop), lets in-flight requests on
   every keep-alive worker finish and close their connection, then exits `0`
-  once all workers are done or a deadline is reached, whichever comes
-  first. Deadline is `NYX_SERVE_DRAIN_SECS` (default `10`s; `0` = exit
-  immediately). Requires nyx >= 0.24.26.
+  after the **full** `NYX_SERVE_DRAIN_SECS` deadline (default `10`s) — the
+  runtime has no worker join, so it always waits the whole deadline, it does
+  not return early once workers are idle. Tune `NYX_SERVE_DRAIN_SECS` down
+  for fast redeploys (`0` = exit immediately, no drain wait). Requires nyx
+  >= 0.24.26.
 - **Structured access log**: `app_access_log(&mut app)` (from `std/web`)
   opts into one JSON line per request on stdout — `ts`, `method`, `path`,
   `status`, `dur_us`, `bytes`, and `request_id` when set upstream. See
@@ -126,8 +128,11 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Novedades en v0.6.0**: apagado ordenado (`serve_app` maneja `SIGTERM` —
 cierra el listener, deja terminar los requests en vuelo de cada worker
-keep-alive y sale con `0` al completar el drain o al llegar al deadline
-`NYX_SERVE_DRAIN_SECS`, default 10s, 0 = inmediato; requiere nyx >= 0.24.26)
+keep-alive y sale con `0` tras esperar el deadline COMPLETO de
+`NYX_SERVE_DRAIN_SECS` (default 10s) — el runtime no hace join de workers,
+así que siempre espera el deadline entero, no vuelve antes si los workers ya
+terminaron; tuneá `NYX_SERVE_DRAIN_SECS` a la baja para redeploys rápidos (0
+= salida inmediata sin espera; requiere nyx >= 0.24.26)
 y access log estructurado (`app_access_log`, una línea JSON por request con
 `ts`/`method`/`path`/`status`/`dur_us`/`bytes`/`request_id` opcional).
 nyx-serve no hace rate limiting; desplegar detrás de un proxy con rate

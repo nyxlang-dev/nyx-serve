@@ -215,8 +215,14 @@ fn __emit_access_log(req: Request, resp: Response) -> int {
         sb.append(json_escape(rid))
         sb.append("\"")
     }
-    sb.append("}")
-    print(sb.to_string())
+    // Un solo write atómico con el \n adentro del buffer (no print(), que
+    // son DOS llamadas stdio — payload y "\n" — y bajo concurrencia real
+    // dos workers pueden intercalar sus líneas) + flush explícito: sin él,
+    // en un pipe (systemd) las líneas quedan bufferizadas y tardan o se
+    // pierden si el proceso muere.
+    sb.append("}\n")
+    term_write(sb.to_string())
+    term_flush()
     return 0
 }
 
@@ -484,9 +490,14 @@ var __serve_listener: int = 0 - 1
 var __serve_draining: int = 0
 var __serve_workers: int = 0
 
+// Allocation-free on purpose: this runs in signal context — GC/malloc locks
+// are not reentrant, so print()/concat/int_to_string/getenv (all of which
+// allocate) can deadlock the process if the signal lands mid-allocation.
+// Guard: a second SIGTERM must not re-close the (already closed, possibly
+// recycled) listener fd.
 fn __on_sigterm(sig: int) -> int {
+    if __serve_draining == 1 { return 0 }
     __serve_draining = 1
-    print("[nyx-serve] SIGTERM: draining (deadline " + int_to_string(__drain_deadline_secs()) + "s)")
     tcp_close(__serve_listener)
     return 0
 }
@@ -630,7 +641,12 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
             channel_send(__serve_ch, client)
         } else {
             if __serve_draining == 1 {
-                // Despertados por el close del handler: iniciar drain.
+                // Despertados por el close del handler: iniciar drain. El
+                // print informativo vive ACÁ (no en __on_sigterm) — este
+                // branch corre en contexto normal del accept loop, no en
+                // contexto de señal, así que alocar (concat/int_to_string)
+                // es seguro.
+                print("[nyx-serve] SIGTERM: draining (deadline " + int_to_string(__drain_deadline_secs()) + "s)")
                 var w: int = 0
                 while w < __serve_workers {
                     channel_send(__serve_ch, 0 - 1)

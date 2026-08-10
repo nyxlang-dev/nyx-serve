@@ -545,6 +545,26 @@ def main():
         _, status, _ = get_on(AL_PORT, "/health")
         check("access-log: GET responde", status == 200, f"({status})")
 
+        # 8 requests concurrentes a /health: cada línea de access-log ahora se
+        # escribe con term_write(sb + "\n") + term_flush() en una sola llamada
+        # de write — reemplaza el print() de dos llamadas stdio (payload,
+        # "\n") que bajo concurrencia real podía intercalar líneas de dos
+        # workers. Se valida más abajo, contra el stdout completo capturado
+        # (post-wait), que TODAS las líneas '{' parsean como JSON individual.
+        concurrent_errors = []
+        def burst():
+            try:
+                _, st, _ = get_on(AL_PORT, "/health")
+                if st != 200:
+                    concurrent_errors.append(st)
+            except Exception as e:
+                concurrent_errors.append(str(e))
+        burst_threads = [threading.Thread(target=burst) for _ in range(8)]
+        for th in burst_threads:
+            th.start()
+        for th in burst_threads:
+            th.join(timeout=10)
+
         # SIGTERM con un request lento EN VUELO: el drain debe dejarlo terminar
         slow_result = {}
         def do_slow():
@@ -588,6 +608,20 @@ def main():
               parsed is not None and parsed.get("method") == "GET"
               and parsed.get("status") == 200 and isinstance(parsed.get("dur_us"), int),
               f"(lines {al_lines[:2]!r})")
+
+        # interleaving: con el write atómico (term_write+term_flush), las
+        # ~10 líneas generadas (1 GET inicial + 8 concurrentes + 1 /slow) por
+        # workers concurrentes deben parsear TODAS como JSON individual —
+        # ninguna corrupta/mezclada con otra.
+        bad_lines = []
+        for l in al_lines:
+            try:
+                json.loads(l)
+            except ValueError:
+                bad_lines.append(l)
+        check("access-log: 8 requests concurrentes sin interleaving (todas las lineas JSON parsean)",
+              len(concurrent_errors) == 0 and len(bad_lines) == 0 and len(al_lines) >= 8,
+              f"(errors={concurrent_errors} bad={bad_lines[:3]!r} total_lines={len(al_lines)})")
     finally:
         if proc_al.poll() is None:
             proc_al.kill()

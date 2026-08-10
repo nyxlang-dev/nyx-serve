@@ -11,9 +11,13 @@ from the Nyx language toolchain.
   receipt, the listener socket is closed immediately (this is what wakes
   the blocking accept loop — no reliance on `EINTR`); every keep-alive
   worker finishes the request in flight, closes that connection, and exits
-  once it picks up the shutdown sentinel. The main thread waits up to a
-  deadline (`NYX_SERVE_DRAIN_SECS`, default 10s; `0` = exit immediately)
-  and then exits `0` regardless of whether every worker has finished.
+  once it picks up the shutdown sentinel. The runtime has no worker join, so
+  the main thread always sleeps the **full** deadline (`NYX_SERVE_DRAIN_SECS`,
+  default 10s; `0` = exit immediately, no wait) regardless of whether workers
+  are already idle, then `serve_app` returns `0`. Tune
+  `NYX_SERVE_DRAIN_SECS` down for fast redeploys. The `SIGTERM` handler
+  itself is allocation-free and guards against a second signal re-closing
+  the listener fd (signal-context GC/malloc locks are not reentrant).
 - **Structured access log**: `app_access_log(&mut app)` (from `std/web`)
   opts into one JSON line per finished request on stdout: `ts` (epoch
   seconds), `method`, `path`, `status`, `dur_us`, `bytes`, and

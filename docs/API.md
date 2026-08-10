@@ -227,13 +227,25 @@ closed immediately (this is what wakes the blocking `accept` loop — no
 reliance on `EINTR`), and every keep-alive worker finishes the request
 currently in flight, closes that connection after writing the response (no
 further requests are accepted on it, keep-alive or not), and exits once it
-picks up the shutdown sentinel. The main thread waits for all workers up to
-a deadline, then calls `exit(0)` regardless of whether every worker has
-actually finished:
+picks up the shutdown sentinel. The signal handler itself is allocation-free
+(no `print`/string concat/`getenv` in signal context — the GC/malloc locks
+those go through are not reentrant, so allocating there risks a deadlock if
+the signal lands mid-allocation) and guarded against a second `SIGTERM`
+re-closing an already-closed fd.
+
+The main thread has **no way to join worker threads** (not exposed by the
+runtime), so it does not detect when workers finish — it always sleeps for
+the **entire** drain deadline, then `serve_app` **returns** `0` (the
+process's actual exit code is whatever the caller does with that return
+value — typically nothing, since it is `main`'s last expression). Waiting
+the full deadline regardless of whether workers are already idle is a known
+cost, not a bug:
 
 - **Deadline**: `NYX_SERVE_DRAIN_SECS` env var, default `10` seconds. `0`
   means no wait — the process exits as soon as the sentinel is sent, without
-  waiting for in-flight requests to finish writing their response.
+  waiting for in-flight requests to finish writing their response. Tune this
+  down for fast redeploys — e.g. `NYX_SERVE_DRAIN_SECS=2` if requests are
+  normally sub-second — since the process always pays the full deadline.
 - **In-flight requests**: still get a complete response written to their
   socket before the connection is closed; the `Connection` response header
   itself is not rewritten to `close` during drain, but the socket is closed
@@ -243,7 +255,17 @@ actually finished:
   new connections on that port immediately.
 
 An idle keep-alive connection holds its worker until the drain deadline —
-the process still exits 0 at the deadline regardless.
+the process still exits (returns) 0 at the deadline regardless.
+
+**Not covered by drain or the access log**: a `413` (body over
+`NYX_HTTP_MAX_BODY`) is written and the connection closed directly from the
+keep-alive loop — it never reaches the dispatcher, so it is never
+access-logged. The WS paths (a successful upgrade, and the WS-specific `404`
+when no route matches) are also outside the dispatcher and are never
+access-logged. Established WebSocket connections get no drain courtesy
+either — the fd is owned by the WS handler once it takes over, not by the
+keep-alive worker, so the main process still exits at the deadline
+regardless of any open WS connections.
 
 ```bash
 NYX_SERVE_DRAIN_SECS=5 ./my-server   # cap drain wait at 5s
