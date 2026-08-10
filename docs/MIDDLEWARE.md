@@ -191,13 +191,28 @@ In addition to middlewares, the dispatcher runs two hook chains (wired in v0.2.2
 - **`app_before(app, hook)`** — `hook: Fn(Request) -> Response`. Runs *before* middlewares. Same contract as a middleware: return `status: 0` to continue (and optionally contribute headers), or a non-zero status to short-circuit.
 - **`app_after(app, hook)`** — `hook: Fn(Request, Response) -> Response`. Runs *after* the final response is resolved (route handler, static file, short-circuit, or 404), but before it is serialized. Each after-hook sees the final `(req, resp)` and returns a possibly-modified `Response`. Use it to observe or stamp the response — access logs, analytics by status code, request-id headers.
 
+A request id is a good fit for `req.ctx` rather than generating it inside
+the after-hook itself: writing it in a wrap means it exists from the very
+start of the request, so the route handler (and `app_error`, if the
+handler panics) can also see it — not just the response that gets stamped
+at the end.
+
 ```nyx
-fn hook_request_id(req: Request, resp: Response) -> Response {
+fn wrap_reqid(req: Request, next: Fn) -> Response {
+    let ctx: Map = req.ctx          // bind before .insert (chained req.ctx.insert(...) doesn't compile today)
+    ctx.insert("request-id", gen_id())  // your id generator
+    let nx: Fn(Request) -> Response = next
+    return nx(req)
+}
+app_wrap(app, wrap_reqid)
+
+fn hook_stamp_reqid(req: Request, resp: Response) -> Response {
+    let ctx: Map = req.ctx
     resp.headers_flat.push("X-Request-Id")
-    resp.headers_flat.push(gen_id())      // your id generator
+    resp.headers_flat.push(ctx.get_or("request-id", "MISSING"))
     return resp
 }
-app_after(app, hook_request_id)           // applies to every response
+app_after(app, hook_stamp_reqid)          // applies to every response
 ```
 
 After-hooks run on **every** response path, including redirects and short-circuited middleware responses.

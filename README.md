@@ -109,6 +109,20 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Cookie sessions** require a running `nyx-kv` instance (via `std/session.nx`).
 
+## What's new in v0.5.1
+
+- **Per-request `ctx`**: every `Request` carries a `ctx: Map` — write once in
+  a wrap or middleware, read it back in the route handler, `app_after` hooks,
+  and `app_error`. It's shared by reference across the per-layer `Request`
+  copies, and each request gets its own (never shared across requests).
+  Requires nyx >= 0.24.25.
+
+**Novedades en v0.5.1**: `ctx` por-request — escribilo una vez en un wrap o
+middleware y leelo en el handler, los hooks `app_after` y `app_error`. Se
+comparte por referencia entre las copias del `Request` de cada capa, y cada
+request tiene el suyo propio (nunca compartido entre requests). Requiere
+nyx >= 0.24.25.
+
 ## What's new in v0.5.0
 
 - **Wrapping middleware** (`app_wrap(app, mw)`, `mw: Fn(Request, Fn) -> Response`):

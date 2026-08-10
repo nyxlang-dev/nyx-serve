@@ -133,7 +133,9 @@ that matches no route and no static file, and its response goes through
 no `app_ws` pattern (formatted directly, without hooks, on that path). The
 `app` at the call site must be declared `var` (registration mutates it
 in place). `app_after` hooks receive the original `Request` the server
-built — not a modified one a wrap may have passed down via `next`.
+built — not a modified one a wrap may have passed down via `next` — but
+`req.ctx` is shared by reference, so per-request state written by any layer
+IS visible there.
 
 ### `app_error(app: &mut App, handler: Fn(Request, String) -> Response)`
 
@@ -272,6 +274,26 @@ new code, since a `"*"` registration swallows every WS upgrade request
 | `form` | Map | Parsed `application/x-www-form-urlencoded` body |
 | `cookies` | Map | Parsed `Cookie` header |
 | `params` | Map | Route path params from `{placeholders}` |
+| `ctx` | Map | Per-request state channel (see below) |
+
+### Request.ctx / request_new
+
+```nyx
+let ctx: Map = req.ctx
+ctx.insert("user", username)          // any layer writes
+let u: String = ctx.get_or("user", "") // any later layer reads
+```
+
+Every request carries `ctx: Map` — a per-request state channel created by
+the dispatcher before anything else runs. Maps are shared by reference
+across struct copies, so state written by a wrap or middleware is visible
+to the route handler, `app_after` hooks and the `app_error` handler, even
+though each receives its own copy of the `Request`. Two requests never
+share a ctx. Use it for authenticated user, request ids, feature flags;
+use a modified Request passed to `next` only to alter routing inputs like
+`path`. `request_new()` (from `std/web`) builds an empty Request — prefer
+it over `Request { ... }` literals in tests and tools, so future fields
+don't break your call sites. Requires nyx >= 0.24.25.
 
 ### `req_json(req: Request) -> Map`
 

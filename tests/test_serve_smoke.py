@@ -461,14 +461,16 @@ def main():
               and f'"request_id":"{ctx1_hdr}"'.encode() in ctx1_body,
               f"(hdr {ctx1_hdr!r} body {ctx1_body[:60]!r})")
 
-        # Aislamiento entre requests: el segundo request obtiene OTRO id
+        # Dos requests secuenciales (no concurrentes) obtienen ids distintos.
+        # La garantía fuerte de que ctx nunca se comparte entre requests
+        # concurrentes la fija test-340 del lang; esto es el smoke E2E.
         conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
         conn.request("GET", "/ctx-demo")
         resp = conn.getresponse()
         ctx2_hdr = resp.getheader("X-Request-Id")
         resp.read()
         conn.close()
-        check("ctx: aislado entre requests (ids distintos)",
+        check("ctx: requests secuenciales obtienen ids distintos",
               ctx2_hdr is not None and ctx2_hdr != ctx1_hdr,
               f"({ctx1_hdr!r} vs {ctx2_hdr!r})")
     finally:

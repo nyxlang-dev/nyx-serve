@@ -4,6 +4,22 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.5.1] - 2026-08-10
+
+### Added
+- **Per-request `ctx`**: `Request.ctx` (a `Map`) built via `request_new()`
+  (from `std/web`) by the dispatcher before anything else runs — a wrap or
+  middleware can write to it and have the value visible to the route
+  handler, `app_after` hooks, and `app_error`, since `ctx` is shared by
+  reference across the per-layer `Request` copies. Two requests never share
+  a `ctx`. Smoke E2E coverage: wrap writes a request-id, the handler reads
+  it into the body, an after-hook stamps it as a header, and two sequential
+  requests are checked for distinct ids.
+
+### Changed
+- The dispatcher now builds every `Request` via `request_new()` instead of
+  a bare struct literal, so `ctx` is always present. Requires nyx >= 0.24.25.
+
 ## [0.5.0] — 2026-08-09
 
 ### Added

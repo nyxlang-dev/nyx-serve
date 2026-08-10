@@ -134,6 +134,9 @@ var __reqid_counter: int = 0
 
 fn wrap_reqid(req: Request, next: Fn) -> Response {
     __reqid_counter = __reqid_counter + 1
+    // Binding to a typed `let` first is a workaround for a compiler gap
+    // with method receivers on chained field access — a bare
+    // req.ctx.insert(...) doesn't work today; don't "simplify" it away.
     let ctx: Map = req.ctx
     ctx.insert("request-id", "req-" + int_to_string(__reqid_counter))
     let nx: Fn(Request) -> Response = next
