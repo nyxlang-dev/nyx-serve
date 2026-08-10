@@ -274,6 +274,23 @@ NYX_SERVE_DRAIN_SECS=0 ./my-server   # exit immediately on SIGTERM
 
 Requires nyx >= 0.24.26.
 
+### serve_on_shutdown
+
+```nyx
+serve_on_shutdown(handler)   // handler: Fn() -> int; register BEFORE serve_app
+```
+
+Registers a cleanup hook for the SIGTERM drain: hooks run in registration
+order after the drain deadline (workers are quiet — consistent state for
+snapshots) and before `serve_app` returns 0. They run in normal context
+(allocation, printing and disk writes are fine — unlike the signal handler
+itself). Each hook is individually guarded: a panicking hook is logged
+(`[nyx-serve] shutdown hook failed: ...`) and neither blocks the remaining
+hooks nor the exit-0 contract. Hooks have no internal timeout — your service
+manager's stop timeout is the outer bound. They only run on the SIGTERM
+drain: SIGKILL or any other termination path skips them. Use case: saving
+in-memory state to disk on shutdown.
+
 ---
 
 ## WebSockets

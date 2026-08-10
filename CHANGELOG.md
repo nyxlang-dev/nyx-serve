@@ -4,6 +4,22 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.6.1] - 2026-08-10
+
+### Added
+- **Shutdown hooks**: `serve_on_shutdown(handler)` registers a cleanup
+  callback (`handler: Fn() -> int`), called before `serve_app`. Hooks run
+  in registration order during the SIGTERM drain, after the drain deadline
+  (workers are quiet — consistent state for snapshots) and before
+  `serve_app` returns `0`. They run in normal context (allocation,
+  printing and disk writes are fine — unlike the signal handler itself).
+  Each hook is individually guarded: a panicking hook is logged
+  (`[nyx-serve] shutdown hook failed: ...`) and neither blocks the
+  remaining hooks nor the exit-0 contract. Hooks have no internal timeout —
+  your service manager's stop timeout is the outer bound. They only run on
+  the SIGTERM drain; SIGKILL or any other termination path skips them.
+  Use case: saving in-memory state to disk on shutdown.
+
 ## [0.6.0] - 2026-08-10
 
 ### Added

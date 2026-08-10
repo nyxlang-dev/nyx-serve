@@ -109,6 +109,27 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Cookie sessions** require a running `nyx-kv` instance (via `std/session.nx`).
 
+## What's new in v0.6.1
+
+- **Shutdown hooks**: `serve_on_shutdown(handler)` registers a cleanup
+  callback (`Fn() -> int`) that runs during the SIGTERM drain — in
+  registration order, after the drain deadline (workers are quiet, so state
+  is consistent for snapshots) and before `serve_app` returns `0`. Runs in
+  normal context (allocation/printing/disk writes are fine). A panicking
+  hook is logged and does not block the remaining hooks or the exit-0
+  contract. Only fires on the SIGTERM drain — not on SIGKILL. Register
+  before calling `serve_app`. Use case: flushing in-memory state to disk on
+  shutdown.
+
+**Novedades en v0.6.1**: hooks de shutdown — `serve_on_shutdown(handler)`
+registra un callback de limpieza que corre durante el drain de `SIGTERM`,
+en orden de registro, después del deadline (workers quietos, estado
+consistente para snapshots) y antes de que `serve_app` retorne `0`. Corre en
+contexto normal (alocar/imprimir/escribir a disco es seguro). Un hook que
+paniquea se loguea y no bloquea a los demás ni el contrato de exit-0. Solo
+corre en el drain de `SIGTERM`, no en `SIGKILL`. Registrar antes de llamar a
+`serve_app`. Caso de uso: volcar estado en memoria a disco al apagar.
+
 ## What's new in v0.6.0
 
 - **Graceful shutdown**: `serve_app` now handles `SIGTERM` — closes the
