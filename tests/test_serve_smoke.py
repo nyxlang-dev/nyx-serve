@@ -7,16 +7,19 @@ El binario se toma de NYX_SERVE_BIN o ./nyx-serve (raíz del stack).
 import base64
 import hashlib
 import http.client
+import json
 import os
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 PORT = int(os.environ.get("SERVE_SMOKE_PORT", "13080"))
 WS_CATCHALL_PORT = int(os.environ.get("SERVE_SMOKE_WS_PORT", "13081"))
+AL_PORT = int(os.environ.get("SERVE_SMOKE_AL_PORT", "13082"))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BINARY = os.environ.get("NYX_SERVE_BIN", os.path.join(ROOT, "nyx-serve"))
 
@@ -55,6 +58,17 @@ def get(conn_or_none, path):
     return conn, resp.status, body
 
 
+def get_on(port, path):
+    """Variante de get() parametrizada por puerto (para daemons en puertos
+    distintos de PORT, p.ej. el daemon --access-log)."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return conn, resp.status, body
+
+
 def get_h(path):
     """GET que también devuelve las cabeceras. No sigue redirects (http.client
     no los sigue por defecto), así podemos inspeccionar el 302 crudo."""
@@ -68,16 +82,41 @@ def get_h(path):
 
 
 def spawn_daemon(port, extra_args=None):
+    # v0.6.0: NYX_SERVE_DRAIN_SECS=0 fuerza teardown inmediato (sin espera de
+    # drain) en TODOS los daemons de este módulo excepto el de
+    # spawn_daemon_capture (el único que ejercita el drain con deadline
+    # corto) — si no, cada stop_daemon() de acá abajo pagaría el deadline
+    # completo (default 10s) y el smoke entero se enlentecería.
+    env = dict(os.environ, NYX_SERVE_DRAIN_SECS="0")
     proc = subprocess.Popen(
         [BINARY, "--port", str(port)] + (extra_args or []),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         cwd=ROOT,
+        env=env,
+    )
+    return proc
+
+
+def spawn_daemon_capture(port, extra_args=None):
+    """Como spawn_daemon, pero con stdout capturado (access-log) y
+    NYX_SERVE_DRAIN_SECS=3 para ejercitar el drain con un deadline corto en
+    vez de esperar el default de 10s."""
+    env = dict(os.environ, NYX_SERVE_DRAIN_SECS="3")
+    proc = subprocess.Popen(
+        [BINARY, "--port", str(port)] + (extra_args or []),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=ROOT,
+        env=env,
     )
     return proc
 
 
 def stop_daemon(proc):
+    # NYX_SERVE_DRAIN_SECS=0 (spawn_daemon) → drain sin espera: el sentinel
+    # se envía y el proceso sale casi de inmediato, así que este
+    # proc.wait(timeout=5) sigue siendo holgado incluso con el drain nuevo.
     proc.send_signal(signal.SIGTERM)
     try:
         proc.wait(timeout=5)
@@ -498,6 +537,61 @@ def main():
             s.close()
     finally:
         stop_daemon(ws_proc)
+
+    # ── v0.6.0: access-log estructurado + graceful drain ──
+    proc_al = spawn_daemon_capture(AL_PORT, ["--access-log"])
+    try:
+        check("daemon access-log arriba", wait_for_port(AL_PORT), "")
+        _, status, _ = get_on(AL_PORT, "/health")
+        check("access-log: GET responde", status == 200, f"({status})")
+
+        # SIGTERM con un request lento EN VUELO: el drain debe dejarlo terminar
+        slow_result = {}
+        def do_slow():
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", AL_PORT, timeout=10)
+                conn.request("GET", "/slow")
+                r = conn.getresponse()
+                slow_result["status"] = r.status
+                slow_result["body"] = r.read()
+                conn.close()
+            except Exception as e:
+                slow_result["error"] = str(e)
+        t = threading.Thread(target=do_slow); t.start()
+        time.sleep(0.5)                       # el request ya está en vuelo
+        proc_al.send_signal(signal.SIGTERM)
+        t.join(timeout=10)
+        check("drain: request en vuelo completa tras SIGTERM",
+              slow_result.get("status") == 200 and b"done" in slow_result.get("body", b""),
+              f"({slow_result})")
+
+        # el proceso sale solo, con código 0, antes del deadline
+        try:
+            rc = proc_al.wait(timeout=12)
+            check("drain: proceso sale solo con exit 0", rc == 0, f"(rc {rc})")
+        except subprocess.TimeoutExpired:
+            check("drain: proceso sale solo con exit 0", False, "(timeout)")
+
+        # la línea de access-log del /health es JSON parseable con los campos
+        out = proc_al.stdout.read().decode(errors="replace")
+        al_lines = [l for l in out.splitlines() if l.startswith("{")]
+        parsed = None
+        for l in al_lines:
+            try:
+                j = json.loads(l)
+                if j.get("path") == "/health":
+                    parsed = j
+                    break
+            except ValueError:
+                pass
+        check("access-log: linea JSON valida con campos",
+              parsed is not None and parsed.get("method") == "GET"
+              and parsed.get("status") == 200 and isinstance(parsed.get("dur_us"), int),
+              f"(lines {al_lines[:2]!r})")
+    finally:
+        if proc_al.poll() is None:
+            proc_al.kill()
+            proc_al.wait()
 
     print(f"smoke: {passed}/{passed + failed} PASS")
     return 0 if failed == 0 else 1

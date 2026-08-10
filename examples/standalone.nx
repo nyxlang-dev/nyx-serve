@@ -28,6 +28,12 @@ fn handle_health(req: Request) -> Response {
     return response_json(200, "{\"status\":\"ok\"}")
 }
 
+// Handler lento para el check de drain del smoke: 2s de trabajo simulado.
+fn handle_slow(req: Request) -> Response {
+    sleep(2000)
+    return response_json(200, "{\"slow\":\"done\"}")
+}
+
 // Renders a fixed template through src/template.nx (Task 3.2), exercising
 // escaped interpolation, {{#if}}/{{else}}, and {{#each}} together in one
 // pass — the E2E counterpart of tests/test_template.nx's unit checks.
@@ -318,6 +324,7 @@ fn main() {
     // para no romper el check de 404 sin match.
     var port: int = 8080
     var ws_catchall: bool = false
+    var access_log: bool = false
     let args: Array = get_args()
     var ai: int = 1
     while ai < args.length() {
@@ -331,7 +338,12 @@ fn main() {
                 ws_catchall = true
                 ai = ai + 1
             } else {
-                ai = ai + 1
+                if arg == "--access-log" {
+                    access_log = true
+                    ai = ai + 1
+                } else {
+                    ai = ai + 1
+                }
             }
         }
     }
@@ -355,10 +367,15 @@ fn main() {
     app_get(app, "/pub/extra", handle_pub_extra)
     // superficie del bloqueador 3 (Request.ctx) — ver wrap_reqid/handle_ctx_demo
     app_get(app, "/ctx-demo", handle_ctx_demo)
+    // v0.6.0: check de drain del smoke — 2s de trabajo simulado.
+    app_get(app, "/slow", handle_slow)
     app_not_found(&mut app, handle_custom_404)
     app_error(&mut app, handle_custom_error)
     app_use(app, mw_visitor)
     app_after(app, hook_stamp_reqid)
+    if access_log {
+        app_access_log(&mut app)
+    }
     // superficie WS (Task 3.1): patrón con {param}, ejercitado por
     // test_serve_smoke.py (handshake + eco + 404 sin match).
     app_ws("/ws/echo/{room}", ws_echo_handler)

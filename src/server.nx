@@ -5,6 +5,7 @@
 
 import "std/web"
 import "std/http"
+import "std/json"
 import "src/files"
 
 // Global App reference for the MT handler (set by serve_app)
@@ -178,7 +179,45 @@ fn __finalize(req: Request, resp: Response, extra_headers: Array) -> String {
         ai = ai + 1
     }
 
+    if __serve_app.access_log {
+        __emit_access_log(req, r)
+    }
+
     return __format_http_response(r)
+}
+
+// Una línea JSON por request a stdout (app_access_log). Campos: ts (epoch
+// s), method, path, status, dur_us, bytes, request_id (solo si alguna capa
+// lo puso en ctx). Strings escapadas con json_escape (std/json).
+fn __emit_access_log(req: Request, resp: Response) -> int {
+    let ctx: Map = req.ctx
+    let t0s: String = ctx.get_or("__t0_us", "")
+    var dur: int = 0
+    if t0s.length() > 0 {
+        dur = time_us() - string_to_int_or(t0s, time_us())
+    }
+    var sb: StringBuilder = StringBuilder.new()
+    sb.append("{\"ts\":")
+    sb.append(int_to_string(time_epoch()))
+    sb.append(",\"method\":\"")
+    sb.append(json_escape(req.method))
+    sb.append("\",\"path\":\"")
+    sb.append(json_escape(req.path))
+    sb.append("\",\"status\":")
+    sb.append(int_to_string(resp.status))
+    sb.append(",\"dur_us\":")
+    sb.append(int_to_string(dur))
+    sb.append(",\"bytes\":")
+    sb.append(int_to_string(str_byte_length(resp.body)))
+    let rid: String = ctx.get_or("request-id", "")
+    if rid.length() > 0 {
+        sb.append(",\"request_id\":\"")
+        sb.append(json_escape(rid))
+        sb.append("\"")
+    }
+    sb.append("}")
+    print(sb.to_string())
+    return 0
 }
 
 // MT handler: converts raw request Array to Request struct and dispatches.
@@ -211,6 +250,11 @@ fn __serve_mt_dispatch(raw: Array) -> String {
     req.path = clean_path
     req.headers_flat = headers
     req.body = body
+
+    // t0 del access-log viaja por ctx (v0.5.1) — el gap de method-call
+    // sobre campo encadenado obliga al binding (no "simplificar").
+    let ctx0: Map = req.ctx
+    ctx0.insert("__t0_us", int_to_string(time_us()))
 
     var extra: Array = []
     try {
@@ -429,6 +473,30 @@ fn __core_response(req: Request, extra: Array) -> Response {
 // Global channel for dispatching client fds to keep-alive workers
 var __serve_ch: Map = Map.new()
 
+// ── Graceful shutdown (v0.6.0) ──
+// SIGTERM → __serve_draining=1 + tcp_close(listener). Cerrar el fd es lo
+// que DESPIERTA al tcp_accept bloqueante del main (verificado
+// empíricamente); no se depende de EINTR. Los workers terminan el request
+// en vuelo, responden Connection: close mientras drenan, y salen al
+// recibir el sentinel. El main espera el drain con deadline
+// (NYX_SERVE_DRAIN_SECS, default 10; 0 = sin espera) y sale con exit 0.
+var __serve_listener: int = 0 - 1
+var __serve_draining: int = 0
+var __serve_workers: int = 0
+
+fn __on_sigterm(sig: int) -> int {
+    __serve_draining = 1
+    print("[nyx-serve] SIGTERM: draining (deadline " + int_to_string(__drain_deadline_secs()) + "s)")
+    tcp_close(__serve_listener)
+    return 0
+}
+
+fn __drain_deadline_secs() -> int {
+    let env: String = getenv("NYX_SERVE_DRAIN_SECS")
+    if env.length() == 0 { return 10 }
+    return string_to_int_or(env, 10)
+}
+
 // Keep-alive worker: serves multiple requests per connection
 fn __serve_ka_worker() -> int {
     while 1 > 0 {
@@ -512,6 +580,16 @@ fn __serve_ka_worker() -> int {
                     if conn == "close" {
                         keep_alive = false
                     }
+                    // Drain en curso: el request en vuelo ya recibió su
+                    // respuesta completa arriba (con header keep-alive, si
+                    // eso es lo que escribió __format_http_response) — el
+                    // server cierra el socket de todos modos tras escribir.
+                    // Correcto a nivel TCP (el cliente ve EOF tras leer el
+                    // body completo por Content-Length); documentado acá
+                    // porque no se reescribe el header de Connection.
+                    if __serve_draining == 1 {
+                        keep_alive = false
+                    }
                 }
                 }
             }
@@ -536,6 +614,10 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
         return 0
     }
 
+    __serve_listener = server
+    __serve_workers = workers
+    signal_handle(15, __on_sigterm)
+
     var i: int = 0
     while i < workers {
         thread_spawn(__serve_ka_worker)
@@ -546,6 +628,25 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
         let client: int = tcp_accept(server)
         if client >= 0 {
             channel_send(__serve_ch, client)
+        } else {
+            if __serve_draining == 1 {
+                // Despertados por el close del handler: iniciar drain.
+                var w: int = 0
+                while w < __serve_workers {
+                    channel_send(__serve_ch, 0 - 1)
+                    w = w + 1
+                }
+                let deadline_ms: int = __drain_deadline_secs() * 1000
+                var waited: int = 0
+                // Espera simple con deadline: los workers salen al drenar;
+                // no hay join de threads en el runtime → dormir en tramos.
+                while waited < deadline_ms {
+                    sleep(200)
+                    waited = waited + 200
+                }
+                print("[nyx-serve] drain complete, exiting")
+                return 0
+            }
         }
     }
     return 0
