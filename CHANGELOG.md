@@ -18,7 +18,9 @@ from the Nyx language toolchain.
   remaining hooks nor the exit-0 contract. Hooks have no internal timeout —
   your service manager's stop timeout is the outer bound. They only run on
   the SIGTERM drain; SIGKILL or any other termination path skips them.
-  Use case: saving in-memory state to disk on shutdown.
+  Use case: saving in-memory state to disk on shutdown. Quiescence assumes
+  in-flight requests fit inside `NYX_SERVE_DRAIN_SECS`; a 0 deadline or a
+  long request can still leave hooks running mid-request.
 
 ## [0.6.0] - 2026-08-10
 

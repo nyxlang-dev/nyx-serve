@@ -591,6 +591,8 @@ def main():
             rc = proc_al.wait(timeout=12)
             check("drain: proceso sale solo con exit 0", rc == 0, f"(rc {rc})")
         except subprocess.TimeoutExpired:
+            proc_al.kill()
+            proc_al.wait()
             check("drain: proceso sale solo con exit 0", False, "(timeout)")
 
         # la línea de access-log del /health es JSON parseable con los campos
@@ -639,6 +641,8 @@ def main():
         try:
             rc = proc_sh.wait(timeout=12)
         except subprocess.TimeoutExpired:
+            proc_sh.kill()
+            proc_sh.wait()
             rc = None
         sh_out = proc_sh.stdout.read().decode(errors="replace")
         check("shutdown hooks: panic del 1ro no impide exit 0 ni al 2do",

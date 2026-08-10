@@ -291,6 +291,11 @@ manager's stop timeout is the outer bound. They only run on the SIGTERM
 drain: SIGKILL or any other termination path skips them. Use case: saving
 in-memory state to disk on shutdown.
 
+Quiescence assumes in-flight requests fit inside `NYX_SERVE_DRAIN_SECS` —
+with the deadline set to 0 (or exceeded by a long request), hooks may run
+while workers are still mid-request; don't use 0 if your hook needs a
+consistent view.
+
 ---
 
 ## WebSockets
