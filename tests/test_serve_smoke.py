@@ -200,13 +200,16 @@ def main():
               "sid=abc" in (hdrs.get("set-cookie") or ""),
               f"(set-cookie {hdrs.get('set-cookie')!r})")
 
-        # Bug 3: app_after cableado — X-Request-Id en toda respuesta (incl. 302)
+        # Bug 3: app_after cableado — X-Request-Id en toda respuesta (incl. 302).
+        # Bloqueador 3: el valor es real (wrap_reqid vía ctx), no un placeholder
+        # fijo — basta con "presente y con la forma req-N" acá; la coherencia
+        # exacta body/header se prueba más abajo con /ctx-demo.
         check("after-hook X-Request-Id en redirect",
-              hdrs.get("x-request-id") == "test",
+              (hdrs.get("x-request-id") or "").startswith("req-"),
               f"(x-request-id {hdrs.get('x-request-id')!r})")
         _, _, hdrs_root = get_h("/")
         check("after-hook X-Request-Id en 200",
-              hdrs_root.get("x-request-id") == "test",
+              (hdrs_root.get("x-request-id") or "").startswith("req-"),
               f"(x-request-id {hdrs_root.get('x-request-id')!r})")
 
         # Bug 2: middleware que continúa (status 0) aporta cabeceras downstream
@@ -442,6 +445,32 @@ def main():
         check("fall-through a ruta real del app bajo /pub (path original preservado)",
               status == 200 and b'"app":"extra"' in body,
               f"(status {status} body {body[:60]!r})")
+
+        # Bloqueador 3 — Request.ctx: el wrap escribe, el handler lee (body),
+        # el after-hook estampa (header). Body y header deben COINCIDIR: el
+        # after-hook ve el ctx que escribió el wrap pese a recibir el Request
+        # "original" (mismo Map por referencia).
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/ctx-demo")
+        resp = conn.getresponse()
+        ctx1_hdr = resp.getheader("X-Request-Id")
+        ctx1_body = resp.read()
+        conn.close()
+        check("ctx: wrap→handler→after-hook coherente",
+              ctx1_hdr is not None and ctx1_hdr != "MISSING"
+              and f'"request_id":"{ctx1_hdr}"'.encode() in ctx1_body,
+              f"(hdr {ctx1_hdr!r} body {ctx1_body[:60]!r})")
+
+        # Aislamiento entre requests: el segundo request obtiene OTRO id
+        conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+        conn.request("GET", "/ctx-demo")
+        resp = conn.getresponse()
+        ctx2_hdr = resp.getheader("X-Request-Id")
+        resp.read()
+        conn.close()
+        check("ctx: aislado entre requests (ids distintos)",
+              ctx2_hdr is not None and ctx2_hdr != ctx1_hdr,
+              f"({ctx1_hdr!r} vs {ctx2_hdr!r})")
     finally:
         stop_daemon(proc)
 

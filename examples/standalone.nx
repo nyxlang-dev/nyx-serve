@@ -124,11 +124,37 @@ fn mw_visitor(req: Request) -> Response {
     return Response { status: 0, headers_flat: h, body: "" }
 }
 
-// After-hook that stamps a request id — exercises app_after being wired into
-// the MT dispatcher (basis for access-log / analytics by status).
-fn hook_reqid(req: Request, resp: Response) -> Response {
+// ── Superficie del bloqueador 3 (Request.ctx), ejercitada por el smoke ──
+// Flujo request-id completo: el wrap escribe en ctx ANTES de next, el
+// handler lo lee (mismo Map, compartido por referencia entre las copias del
+// struct), y el after-hook lo estampa como header. El valor es un contador
+// global para poder verificar AISLAMIENTO entre requests (cada request ve
+// su propio valor, no un ctx compartido entre requests).
+var __reqid_counter: int = 0
+
+fn wrap_reqid(req: Request, next: Fn) -> Response {
+    __reqid_counter = __reqid_counter + 1
+    let ctx: Map = req.ctx
+    ctx.insert("request-id", "req-" + int_to_string(__reqid_counter))
+    let nx: Fn(Request) -> Response = next
+    return nx(req)
+}
+
+fn handle_ctx_demo(req: Request) -> Response {
+    let ctx: Map = req.ctx
+    let rid: String = ctx.get_or("request-id", "MISSING")
+    return response_json(200, "{\"request_id\":\"" + rid + "\"}")
+}
+
+// After-hook que estampa el request-id del ctx como header — exercises
+// app_after being wired into the MT dispatcher (basis for access-log /
+// analytics by status), ahora con un valor real por-request en vez del
+// placeholder fijo que tenía esta superficie antes del bloqueador 3.
+fn hook_stamp_reqid(req: Request, resp: Response) -> Response {
+    let ctx: Map = req.ctx
+    let rid: String = ctx.get_or("request-id", "MISSING")
     resp.headers_flat.push("X-Request-Id")
-    resp.headers_flat.push("test")
+    resp.headers_flat.push(rid)
     return resp
 }
 
@@ -323,10 +349,12 @@ fn main() {
     app_get(app, "/panic", handle_panic)
     // ruta real del app bajo el prefijo mounted /pub — ver handle_pub_extra
     app_get(app, "/pub/extra", handle_pub_extra)
+    // superficie del bloqueador 3 (Request.ctx) — ver wrap_reqid/handle_ctx_demo
+    app_get(app, "/ctx-demo", handle_ctx_demo)
     app_not_found(&mut app, handle_custom_404)
     app_error(&mut app, handle_custom_error)
     app_use(app, mw_visitor)
-    app_after(app, hook_reqid)
+    app_after(app, hook_stamp_reqid)
     // superficie WS (Task 3.1): patrón con {param}, ejercitado por
     // test_serve_smoke.py (handshake + eco + 404 sin match).
     app_ws("/ws/echo/{room}", ws_echo_handler)
@@ -334,6 +362,9 @@ fn main() {
         serve_ws(ws_legacy_handler)
     }
 
+    // wrap_reqid PRIMERO: envuelve TODO (incl. wrap_timing/wrap_teapot y sus
+    // 418), así el ctx queda escrito para cualquier capa downstream.
+    app_wrap(app, wrap_reqid)
     app_wrap(app, wrap_timing)
     app_wrap(app, wrap_teapot)
 

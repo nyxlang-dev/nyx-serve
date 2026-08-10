@@ -202,12 +202,15 @@ fn __serve_mt_dispatch(raw: Array) -> String {
     if qp >= 0 { clean_path = path.substring(0, qp) }
 
     // Request mínimo antes del try: método+path siempre disponibles para el
-    // error handler aunque el parseo de query/cookies/form panickee.
-    var q0: Map = map_new()
-    var f0: Map = map_new()
-    var c0: Map = map_new()
-    var p0: Map = map_new()
-    var req: Request = Request { method: method, path: clean_path, query: q0, headers_flat: headers, body: body, form: f0, cookies: c0, params: p0 }
+    // error handler aunque el parseo de query/cookies/form panickee. El ctx
+    // nace acá (request_new): compartido por referencia entre TODAS las
+    // copias del struct — lo que un wrap/mw inserte lo ven el handler, los
+    // after-hooks y el error handler.
+    var req: Request = request_new()
+    req.method = method
+    req.path = clean_path
+    req.headers_flat = headers
+    req.body = body
 
     var extra: Array = []
     try {
@@ -486,11 +489,10 @@ fn __serve_ka_worker() -> int {
                         // std/web), formateado directo — este camino no pasa
                         // por el dispatcher HTTP ni sus hooks. Guard propio:
                         // si el handler custom panickea, cae al default.
-                        var wq: Map = map_new()
-                        var wf: Map = map_new()
-                        var wc: Map = map_new()
-                        var wp: Map = map_new()
-                        let wreq: Request = Request { method: "GET", path: clean_path, query: wq, headers_flat: headers, body: "", form: wf, cookies: wc, params: wp }
+                        var wreq: Request = request_new()
+                        wreq.method = "GET"
+                        wreq.path = clean_path
+                        wreq.headers_flat = headers
                         var wresp: Response = default_not_found(wreq)
                         try {
                             let nf: Fn(Request) -> Response = __serve_app.not_found_handler
