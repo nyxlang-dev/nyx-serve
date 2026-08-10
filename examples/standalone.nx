@@ -16,9 +16,26 @@
 
 import "std/web"
 import "std/websocket"
+import "std/file"
 import "src/server"
 import "src/template"
 import "src/multipart"
+
+// Superficie de serve_on_shutdown (v0.6.1), ejercitada por el smoke: el
+// primer hook PANICKEA a propósito (el guard debe loguearlo y seguir); el
+// segundo escribe el marcador — si existe post-exit, ambos contratos
+// (guard + ejecución en orden) quedan probados de una.
+var __marker_path: String = ""
+
+fn hook_that_panics() -> int {
+    panic("boom-shutdown-hook")
+    return 0
+}
+
+fn hook_write_marker() -> int {
+    write_text(__marker_path, "shutdown-ok")
+    return 0
+}
 
 fn handle_root(req: Request) -> Response {
     return response_html(200, "<h1>nyx-serve standalone</h1><p>OK</p>")
@@ -325,6 +342,7 @@ fn main() {
     var port: int = 8080
     var ws_catchall: bool = false
     var access_log: bool = false
+    var shutdown_marker: String = ""
     let args: Array = get_args()
     var ai: int = 1
     while ai < args.length() {
@@ -334,18 +352,29 @@ fn main() {
             port = string_to_int(port_arg)
             ai = ai + 2
         } else {
-            if arg == "--ws-catchall" {
-                ws_catchall = true
-                ai = ai + 1
+            if arg == "--shutdown-marker" and ai + 1 < args.length() {
+                shutdown_marker = args[ai + 1]
+                ai = ai + 2
             } else {
-                if arg == "--access-log" {
-                    access_log = true
+                if arg == "--ws-catchall" {
+                    ws_catchall = true
                     ai = ai + 1
                 } else {
-                    ai = ai + 1
+                    if arg == "--access-log" {
+                        access_log = true
+                        ai = ai + 1
+                    } else {
+                        ai = ai + 1
+                    }
                 }
             }
         }
+    }
+
+    if shutdown_marker.length() > 0 {
+        __marker_path = shutdown_marker
+        serve_on_shutdown(hook_that_panics)
+        serve_on_shutdown(hook_write_marker)
     }
 
     var app: App = app_new()

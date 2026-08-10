@@ -490,6 +490,33 @@ var __serve_listener: int = 0 - 1
 var __serve_draining: int = 0
 var __serve_workers: int = 0
 
+// Shutdown hooks (v0.6.1): corren en el drain de SIGTERM, DESPUÉS del
+// deadline (workers quietos — estado consistente para snapshots) y antes
+// del return de serve_app. Contexto normal, no de señal. Registrar ANTES
+// de serve_app (que bloquea). Solo SIGTERM: SIGKILL u otras señales no
+// pasan por acá.
+var __serve_shutdown_hooks: Array = []
+
+pub fn serve_on_shutdown(handler: Fn) {
+    __serve_shutdown_hooks.push(handler)
+}
+
+// Cada hook con guard propio: un panic se loguea y no impide los hooks
+// siguientes ni el exit 0.
+fn __run_shutdown_hooks() -> int {
+    var i: int = 0
+    while i < __serve_shutdown_hooks.length() {
+        try {
+            let h: Fn() -> int = __serve_shutdown_hooks[i]
+            h()
+        } catch(e: String) {
+            print("[nyx-serve] shutdown hook failed: " + e)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 // Allocation-free on purpose: this runs in signal context — GC/malloc locks
 // are not reentrant, so print()/concat/int_to_string/getenv (all of which
 // allocate) can deadlock the process if the signal lands mid-allocation.
@@ -660,6 +687,7 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
                     sleep(200)
                     waited = waited + 200
                 }
+                __run_shutdown_hooks()
                 print("[nyx-serve] drain complete, exiting")
                 return 0
             }

@@ -20,6 +20,7 @@ import time
 PORT = int(os.environ.get("SERVE_SMOKE_PORT", "13080"))
 WS_CATCHALL_PORT = int(os.environ.get("SERVE_SMOKE_WS_PORT", "13081"))
 AL_PORT = int(os.environ.get("SERVE_SMOKE_AL_PORT", "13082"))
+SH_PORT = int(os.environ.get("SERVE_SMOKE_SH_PORT", "13083"))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BINARY = os.environ.get("NYX_SERVE_BIN", os.path.join(ROOT, "nyx-serve"))
 
@@ -626,6 +627,33 @@ def main():
         if proc_al.poll() is None:
             proc_al.kill()
             proc_al.wait()
+
+    # ── v0.6.1: serve_on_shutdown ──
+    marker = os.path.join(ROOT, ".smoke_shutdown_marker")
+    if os.path.exists(marker):
+        os.remove(marker)
+    proc_sh = spawn_daemon_capture(SH_PORT, ["--shutdown-marker", marker])
+    try:
+        check("daemon shutdown-hook arriba", wait_for_port(SH_PORT), "")
+        proc_sh.send_signal(signal.SIGTERM)
+        try:
+            rc = proc_sh.wait(timeout=12)
+        except subprocess.TimeoutExpired:
+            rc = None
+        sh_out = proc_sh.stdout.read().decode(errors="replace")
+        check("shutdown hooks: panic del 1ro no impide exit 0 ni al 2do",
+              rc == 0 and os.path.exists(marker)
+              and "shutdown hook failed" in sh_out,
+              f"(rc {rc} marker {os.path.exists(marker)} out {sh_out[-200:]!r})")
+        check("shutdown hooks: marcador con contenido esperado",
+              os.path.exists(marker) and open(marker).read() == "shutdown-ok",
+              "")
+    finally:
+        if proc_sh.poll() is None:
+            proc_sh.kill()
+            proc_sh.wait()
+        if os.path.exists(marker):
+            os.remove(marker)
 
     print(f"smoke: {passed}/{passed + failed} PASS")
     return 0 if failed == 0 else 1
