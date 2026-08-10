@@ -130,6 +130,7 @@ fn mw_visitor(req: Request) -> Response {
 // struct), y el after-hook lo estampa como header. El valor es un contador
 // global para poder verificar AISLAMIENTO entre requests (cada request ve
 // su propio valor, no un ctx compartido entre requests).
+// Demo only: plain global counter, not atomic — don't copy as a production id generator.
 var __reqid_counter: int = 0
 
 fn wrap_reqid(req: Request, next: Fn) -> Response {
