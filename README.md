@@ -109,6 +109,30 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Cookie sessions** require a running `nyx-kv` instance (via `std/session.nx`).
 
+## What's new in v0.6.0
+
+- **Graceful shutdown**: `serve_app` now handles `SIGTERM` — closes the
+  listener immediately (waking the accept loop), lets in-flight requests on
+  every keep-alive worker finish and close their connection, then exits `0`
+  once all workers are done or a deadline is reached, whichever comes
+  first. Deadline is `NYX_SERVE_DRAIN_SECS` (default `10`s; `0` = exit
+  immediately). Requires nyx >= 0.24.26.
+- **Structured access log**: `app_access_log(&mut app)` (from `std/web`)
+  opts into one JSON line per request on stdout — `ts`, `method`, `path`,
+  `status`, `dur_us`, `bytes`, and `request_id` when set upstream. See
+  `docs/API.md` and `docs/MIDDLEWARE.md`.
+- nyx-serve does not rate-limit; deploy behind a rate-limiting proxy such as
+  nyx-proxy.
+
+**Novedades en v0.6.0**: apagado ordenado (`serve_app` maneja `SIGTERM` —
+cierra el listener, deja terminar los requests en vuelo de cada worker
+keep-alive y sale con `0` al completar el drain o al llegar al deadline
+`NYX_SERVE_DRAIN_SECS`, default 10s, 0 = inmediato; requiere nyx >= 0.24.26)
+y access log estructurado (`app_access_log`, una línea JSON por request con
+`ts`/`method`/`path`/`status`/`dur_us`/`bytes`/`request_id` opcional).
+nyx-serve no hace rate limiting; desplegar detrás de un proxy con rate
+limiting como nyx-proxy.
+
 ## What's new in v0.5.1
 
 - **Per-request `ctx`**: every `Request` carries a `ctx: Map` — write once in
@@ -208,6 +232,8 @@ redirects 3xx.
   override
 - Mounts/wraps do not apply to WebSocket upgrades; no per-router static
   serving
+- No built-in rate limiting — deploy behind a rate-limiting proxy such as
+  nyx-proxy
 
 ## License
 

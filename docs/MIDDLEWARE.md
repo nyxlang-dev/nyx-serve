@@ -104,11 +104,28 @@ app_use(app, mw_cors)
 
 ### Logging
 
-There is **no** built-in access logging in nyx-serve. (The `mw_logging`
-symbol exported by `std/web` is a dead no-op stub — registering it does
-nothing; don't.) If you need request logging, write your own middleware
-(see "Request Logging with Body" below) or an `app_after` hook that prints
-`req`/`resp`.
+nyx-serve has a built-in, opt-in access log — enable it with
+`app_access_log(&mut app)` (from `std/web`; the `app` at the call site must
+be declared `var`, same registration pattern as `app_not_found`):
+
+```nyx
+var app: App = app_new()
+app_access_log(&mut app)
+```
+
+Once enabled, the dispatcher writes one JSON line to stdout per finished
+request — after every `app_after` hook has run — with these fields, in
+order: `ts` (Unix epoch seconds), `method`, `path`, `status`, `dur_us`
+(wall time in microseconds), `bytes` (response body length), and
+`request_id` (only present if some earlier layer wrote
+`ctx.insert("request-id", ...)`). Full field-by-field reference:
+`docs/API.md` (`app_access_log`).
+
+The `mw_logging` symbol exported by `std/web` is a dead no-op stub,
+superseded by the built-in access log — registering it does nothing; don't.
+If you need something the built-in log doesn't cover (e.g. logging the
+request body), write your own middleware (see "Request Logging with Body"
+below) or an `app_after` hook that prints `req`/`resp`.
 
 ---
 

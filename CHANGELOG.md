@@ -4,6 +4,28 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.6.0] - 2026-08-10
+
+### Added
+- **Graceful shutdown**: `serve_app` installs a `SIGTERM` handler. On
+  receipt, the listener socket is closed immediately (this is what wakes
+  the blocking accept loop — no reliance on `EINTR`); every keep-alive
+  worker finishes the request in flight, closes that connection, and exits
+  once it picks up the shutdown sentinel. The main thread waits up to a
+  deadline (`NYX_SERVE_DRAIN_SECS`, default 10s; `0` = exit immediately)
+  and then exits `0` regardless of whether every worker has finished.
+- **Structured access log**: `app_access_log(&mut app)` (from `std/web`)
+  opts into one JSON line per finished request on stdout: `ts` (epoch
+  seconds), `method`, `path`, `status`, `dur_us`, `bytes`, and
+  `request_id` (only when an earlier layer wrote `ctx["request-id"]`).
+  Emitted after the `app_after` hook chain runs. The `mw_logging` stub from
+  `std/web` is now explicitly documented as superseded by this.
+
+### Changed
+- `docs/API.md`/`docs/MIDDLEWARE.md`: documented rate limiting as
+  out of scope — deploy behind a rate-limiting proxy such as nyx-proxy.
+- Requires nyx >= 0.24.26.
+
 ## [0.5.1] - 2026-08-10
 
 ### Added

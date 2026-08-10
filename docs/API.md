@@ -176,6 +176,82 @@ Requests whose body exceeds `NYX_HTTP_MAX_BODY` (default 1 MiB) are rejected
 automatically with `413 Payload Too Large` + `Connection: close` — the body
 is never read or drained (anti-DoS), and the handler never runs.
 
+nyx-serve does not rate-limit; deploy behind a rate-limiting proxy such as
+nyx-proxy.
+
+---
+
+### `app_access_log(app: &mut App)`
+
+Opt-in, from `std/web` (`import "std/web"`; the `app` at the call site must
+be declared `var` and passed as `app_access_log(&mut app)` — same
+registration pattern as `app_not_found`/`serve_static`). Once enabled, the
+dispatcher writes one JSON line to stdout per finished request, after the
+`app_after` hook chain runs (see `__finalize` in `src/server.nx`). Fields,
+in emission order:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | int | Unix epoch, **seconds** (`time_epoch()`) |
+| `method` | String | `req.method` |
+| `path` | String | `req.path` (clean path, query string stripped) |
+| `status` | int | `resp.status` |
+| `dur_us` | int | Wall time in microseconds from dispatch entry to this point (`time_us()` delta, via a `__t0_us` marker carried in `req.ctx`) |
+| `bytes` | int | Byte length of `resp.body` |
+| `request_id` | String | **Only present** if some earlier layer wrote `ctx.insert("request-id", ...)` (see the request-id pattern in `docs/MIDDLEWARE.md`) — omitted entirely otherwise |
+
+String fields are JSON-escaped (`json_escape` from `std/json`). Example line
+(no `request_id` set):
+
+```json
+{"ts":1785600000,"method":"GET","path":"/health","status":200,"dur_us":42,"bytes":15}
+```
+
+With a request id set upstream:
+
+```json
+{"ts":1785600000,"method":"GET","path":"/ctx-demo","status":200,"dur_us":118,"bytes":31,"request_id":"a1b2c3"}
+```
+
+```nyx
+var app: App = app_new()
+app_access_log(&mut app)
+```
+
+---
+
+### Graceful shutdown (SIGTERM)
+
+`serve_app` installs a `SIGTERM` handler. On receipt: the listener socket is
+closed immediately (this is what wakes the blocking `accept` loop — no
+reliance on `EINTR`), and every keep-alive worker finishes the request
+currently in flight, closes that connection after writing the response (no
+further requests are accepted on it, keep-alive or not), and exits once it
+picks up the shutdown sentinel. The main thread waits for all workers up to
+a deadline, then calls `exit(0)` regardless of whether every worker has
+actually finished:
+
+- **Deadline**: `NYX_SERVE_DRAIN_SECS` env var, default `10` seconds. `0`
+  means no wait — the process exits as soon as the sentinel is sent, without
+  waiting for in-flight requests to finish writing their response.
+- **In-flight requests**: still get a complete response written to their
+  socket before the connection is closed; the `Connection` response header
+  itself is not rewritten to `close` during drain, but the socket is closed
+  right after anyway, so the client still observes connection close after
+  reading the full body.
+- **New requests**: none — the listener is already closed, so the OS refuses
+  new connections on that port immediately.
+
+An idle keep-alive connection holds its worker until the drain deadline —
+the process still exits 0 at the deadline regardless.
+
+```bash
+NYX_SERVE_DRAIN_SECS=5 ./my-server   # cap drain wait at 5s
+NYX_SERVE_DRAIN_SECS=0 ./my-server   # exit immediately on SIGTERM
+```
+
+Requires nyx >= 0.24.26.
+
 ---
 
 ## WebSockets
@@ -349,10 +425,12 @@ cors_configure("https://example.com", "GET, POST", "Content-Type, Authorization"
 app_use(app, mw_cors)
 ```
 
-> **Note:** there is **no** built-in request-logging middleware. The
-> `mw_logging` symbol exported by `std/web` is a dead no-op stub and should
-> not be registered. To log requests, write your own middleware or an
-> `app_after` hook (see `docs/MIDDLEWARE.md`).
+> **Note:** there is no request-logging *middleware* — logging is opt-in via
+> `app_access_log(&mut app)` (see the Server section above), which emits a
+> structured JSON line per request. The `mw_logging` symbol exported by
+> `std/web` is a dead no-op stub, superseded by the built-in access log, and
+> should not be registered. To log something custom, write your own
+> middleware or an `app_after` hook (see `docs/MIDDLEWARE.md`).
 
 ---
 
