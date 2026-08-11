@@ -189,7 +189,11 @@ pub fn ws_drain_close() -> int {
     var i: int = 0
     while i < fds.length() {
         let fd: int = fds[i]
+        // Registry is already empty and mutex free here; lock anyway so this
+        // last write stays consistent with the module's no-interleave rule.
+        mutex_lock(__ws_mu)
         tcp_write(fd, cf)
+        mutex_unlock(__ws_mu)
         tcp_close(fd)
         i = i + 1
     }
