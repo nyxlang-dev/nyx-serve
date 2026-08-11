@@ -513,6 +513,63 @@ def main():
         check("ctx: requests secuenciales obtienen ids distintos",
               ctx2_hdr is not None and ctx2_hdr != ctx1_hdr,
               f"({ctx1_hdr!r} vs {ctx2_hdr!r})")
+
+        # ── v0.7.0: WS rooms & broadcast ──
+        def ws_recv_text(sock, timeout=6):
+            sock.settimeout(timeout)
+            data = sock.recv(4096)
+            # server frames are unmasked: 0x81, len, payload
+            if len(data) >= 2 and data[0] == 0x81:
+                ln = data[1] & 0x7F
+                return data[2:2+ln]
+            return data
+
+        sa1 = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        sa2 = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        sb1 = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+        try:
+            ws_handshake(sa1, "/rooms/alpha")
+            ws_handshake(sa2, "/rooms/alpha")
+            ws_handshake(sb1, "/rooms/beta")
+            time.sleep(0.3)
+
+            _, status, body = get(None, "/ws-count")
+            check("rooms: 3 conexiones registradas",
+                  status == 200 and b'"count":3' in body, f"({body!r})")
+
+            _, status, _ = get(None, "/ws-send/alpha")
+            m1 = ws_recv_text(sa1)
+            m2 = ws_recv_text(sa2)
+            check("broadcast: llega a los 2 de la sala",
+                  b"hola-alpha" in m1 and b"hola-alpha" in m2,
+                  f"({m1!r} {m2!r})")
+
+            # el de beta NO debe recibir nada: un recv corto debe timeoutear
+            sb1.settimeout(1.0)
+            leaked = None
+            try:
+                leaked = sb1.recv(4096)
+            except socket.timeout:
+                pass
+            check("broadcast: NO llega a la otra sala", leaked is None,
+                  f"({leaked!r})")
+
+            # cierre de un cliente → el count baja
+            sa2.close()
+            time.sleep(0.5)
+            _, status, body = get(None, "/ws-count")
+            check("reader: desconexion baja el count",
+                  status == 200 and b'"count":2' in body, f"({body!r})")
+        finally:
+            for s in (sa1, sb1):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+            try:
+                sa2.close()
+            except OSError:
+                pass
     finally:
         stop_daemon(proc)
 

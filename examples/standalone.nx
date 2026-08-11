@@ -20,6 +20,7 @@ import "std/file"
 import "src/server"
 import "src/template"
 import "src/multipart"
+import "src/ws"
 
 // Superficie de serve_on_shutdown (v0.6.1), ejercitada por el smoke: el
 // primer hook PANICKEA a propósito (el guard debe loguearlo y seguir); el
@@ -262,6 +263,36 @@ fn ws_legacy_handler(info: Array) -> int {
     return 1
 }
 
+// ── Superficie de rooms/broadcast (v0.7.0) ──
+// El handler colapsa a ws_accept; el room sale del {room} de la ruta. Las
+// rutas HTTP de abajo disparan broadcast y exponen counts para que el
+// smoke verifique sin tocar internals.
+fn ws_room_handler(info: Array) -> int {
+    let fd: int = info[0]
+    let headers: Array = info[2]
+    let params: Array = info[3]
+    var room: String = "default"
+    var i: int = 0
+    while i + 1 < params.length() {
+        let k: String = params[i]
+        if k == "room" {
+            room = params[i + 1]
+        }
+        i = i + 2
+    }
+    return ws_accept(fd, room, headers)
+}
+
+fn handle_ws_send(req: Request) -> Response {
+    let room: String = req.params.get("room")
+    ws_broadcast(room, "{\"msg\":\"hola-" + room + "\"}")
+    return response_json(200, "{\"sent\":true}")
+}
+
+fn handle_ws_count(req: Request) -> Response {
+    return response_json(200, "{\"count\":" + int_to_string(ws_count()) + "}")
+}
+
 // ── Superficie del bloqueador 2 (wraps + routers), ejercitada por el smoke ──
 
 // Wrap global de timing: envuelve TODO (hooks, mws, mounts, rutas, static,
@@ -411,6 +442,10 @@ fn main() {
     if ws_catchall {
         serve_ws(ws_legacy_handler)
     }
+    // superficie rooms/broadcast (v0.7.0) — ver ws_room_handler/handle_ws_send
+    app_ws("/rooms/{room}", ws_room_handler)
+    app_get(app, "/ws-send/{room}", handle_ws_send)
+    app_get(app, "/ws-count", handle_ws_count)
 
     // wrap_reqid PRIMERO: envuelve TODO (incl. wrap_timing/wrap_teapot y sus
     // 418), así el ctx queda escrito para cualquier capa downstream.

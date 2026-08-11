@@ -1,0 +1,170 @@
+// ws.nx — First-class WebSocket rooms & broadcast (server-push only).
+// Registry of live WS connections (fd <-> room) under a mutex, one reader
+// thread per connection (detects close/EOF; upstream frames are NOT
+// delivered — this API is push-only by design: validate client input over
+// plain HTTP instead), serialized broadcast (frames never interleave on a
+// fd), and ws_accept() to collapse a typical app_ws handler to three lines.
+// Upstreamed from a consumer pattern proven in production.
+
+import "std/websocket"
+import "std/http"
+
+var __ws_mu: Map = Map.new()
+var __ws_fds: Array = []
+var __ws_rooms: Array = []
+var __ws_ready: int = 0
+
+// Lazy mutex init (double-checked; worst case two mutex_new races on the
+// very first WS connection — benign: registration happens under whichever
+// mutex won the write, and all later calls see the same one).
+fn __ws_ensure() -> int {
+    if __ws_ready == 0 {
+        __ws_mu = mutex_new()
+        __ws_ready = 1
+    }
+    return 0
+}
+
+// Register a live connection in a room and spawn its dedicated reader
+// thread. The reader only detects close/EOF and unregisters — it never
+// delivers upstream frames. Guard kept from the production pattern: only
+// masked TEXT frames (a client keepalive ping) are tolerated; anything
+// else (e.g. raw HTTP if a stale proxy recycles the connection) closes
+// immediately so a zombie fd can't eat someone else's requests.
+pub fn ws_join(fd: int, room: String) {
+    __ws_ensure()
+    mutex_lock(__ws_mu)
+    __ws_fds.push(fd)
+    __ws_rooms.push(room)
+    mutex_unlock(__ws_mu)
+
+    fn __reader() -> int {
+        var go: bool = true
+        while go {
+            let data: String = tcp_read_partial(fd, 4096)
+            if data.length() == 0 {
+                go = false
+            } else {
+                if ws_is_close(data) {
+                    tcp_write(fd, ws_close())
+                    go = false
+                } else {
+                    let b0: int = data.charAt(0)
+                    var b1: int = 0
+                    if data.length() > 1 {
+                        b1 = data.charAt(1)
+                    }
+                    if b0 != 129 or b1 < 128 {
+                        go = false
+                    }
+                }
+            }
+        }
+        ws_leave(fd)
+        tcp_close(fd)
+        return 0
+    }
+    thread_spawn(__reader)
+}
+
+// Explicit unregister (also called automatically by the reader on EOF).
+pub fn ws_leave(fd: int) {
+    __ws_ensure()
+    mutex_lock(__ws_mu)
+    var nf: Array = []
+    var nr: Array = []
+    var i: int = 0
+    while i < __ws_fds.length() {
+        let f: int = __ws_fds[i]
+        if f != fd {
+            let r: String = __ws_rooms[i]
+            nf.push(f)
+            nr.push(r)
+        }
+        i = i + 1
+    }
+    __ws_fds = nf
+    __ws_rooms = nr
+    mutex_unlock(__ws_mu)
+}
+
+// Push a payload to every connection in a room. The mutex serializes
+// broadcasts so frames never interleave on a single fd. A failed write is
+// ignored: that fd's reader will see EOF and clean up.
+pub fn ws_broadcast(room: String, payload: String) {
+    __ws_ensure()
+    let frame: String = ws_frame(payload)
+    mutex_lock(__ws_mu)
+    var i: int = 0
+    while i < __ws_fds.length() {
+        let r: String = __ws_rooms[i]
+        if r == room {
+            let fd: int = __ws_fds[i]
+            tcp_write(fd, frame)
+        }
+        i = i + 1
+    }
+    mutex_unlock(__ws_mu)
+}
+
+// Live WS connections (all rooms / one room).
+pub fn ws_count() -> int {
+    __ws_ensure()
+    mutex_lock(__ws_mu)
+    let n: int = __ws_fds.length()
+    mutex_unlock(__ws_mu)
+    return n
+}
+
+pub fn ws_count_room(room: String) -> int {
+    __ws_ensure()
+    mutex_lock(__ws_mu)
+    var n: int = 0
+    var i: int = 0
+    while i < __ws_rooms.length() {
+        let r: String = __ws_rooms[i]
+        if r == room {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    mutex_unlock(__ws_mu)
+    return n
+}
+
+// Complete the 101 handshake on an fd handed over by an app_ws handler,
+// join the room and spawn the reader. Returns 1 (took ownership of the fd)
+// or 0 if the handshake failed (the server responds/closes normally).
+pub fn ws_accept(fd: int, room: String, headers: Array) -> int {
+    let key: String = http_find_header(headers, "Sec-WebSocket-Key")
+    if key.length() == 0 {
+        return 0
+    }
+    let hs: String = ws_handshake_response(key)
+    if tcp_write(fd, hs) <= 0 {
+        return 0
+    }
+    ws_join(fd, room)
+    return 1
+}
+
+// Drain courtesy (called by serve_app's SIGTERM drain, BEFORE consumer
+// shutdown hooks): send a close frame to every registered connection and
+// close the fds under the mutex. Readers wake on EOF and no-op their
+// unregister (the registry is already cleared).
+pub fn ws_drain_close() -> int {
+    __ws_ensure()
+    mutex_lock(__ws_mu)
+    let cf: String = ws_close()
+    var i: int = 0
+    while i < __ws_fds.length() {
+        let fd: int = __ws_fds[i]
+        tcp_write(fd, cf)
+        tcp_close(fd)
+        i = i + 1
+    }
+    __ws_fds = []
+    __ws_rooms = []
+    mutex_unlock(__ws_mu)
+    return 0
+}
