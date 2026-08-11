@@ -66,19 +66,27 @@ pub fn ws_join(fd: int, room: String) {
                 if ws_is_close(data) {
                     go = false
                     // Close-echo path: take ownership BEFORE writing the
-                    // echo. If __ws_take returns 0, someone else (drain or
-                    // an explicit ws_leave) already took this fd
-                    // concurrently — the OS may have recycled it for an
-                    // unrelated connection, so writing into it now would be
-                    // corrupting a stranger's socket. Only write+close if
-                    // we actually won the take.
+                    // echo. If we win, write+close right here and mark
+                    // closed_here so the ownership block below is skipped.
+                    // If __ws_take returns 0 (case (d): a concurrent
+                    // ws_leave or ws_drain_close already took this fd),
+                    // writing into it now would corrupt a stranger's
+                    // socket — so don't write, AND do NOT set closed_here:
+                    // fall through to the ownership block below, which
+                    // re-checks __ws_take (still 0, cheap no-op scan) and
+                    // applies the same draining-vs-leave distinction as
+                    // any other lost-race wake. Setting closed_here
+                    // unconditionally here was the bug: ws_leave only
+                    // shuts the fd down (doesn't close it), so if this
+                    // reader skipped the ownership block too, nobody ever
+                    // called tcp_close — a leaked fd.
                     if __ws_take(fd) == 1 {
                         mutex_lock(__ws_mu)
                         tcp_write(fd, ws_close())
                         mutex_unlock(__ws_mu)
                         tcp_close(fd)
+                        closed_here = true
                     }
-                    closed_here = true
                 } else {
                     let b0: int = data.charAt(0)
                     var b1: int = 0
@@ -96,8 +104,10 @@ pub fn ws_join(fd: int, room: String) {
             }
         }
         if closed_here == false {
-            // Reached by spontaneous EOF, an abnormal-frame close, or a
-            // wake from ws_leave's tcp_shutdown(). Ownership table:
+            // Reached by (a) spontaneous EOF, (b) an abnormal-frame close,
+            // (c) a wake from ws_leave's tcp_shutdown(), or (d) the
+            // close-echo path above losing its own __ws_take race. Same
+            // ownership table covers all four:
             //   __ws_take==1                     nobody else touched this
             //                                     fd yet -> we close it.
             //   __ws_take==0, __ws_draining==0   ws_leave took it and only
