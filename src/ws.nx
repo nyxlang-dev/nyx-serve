@@ -13,16 +13,33 @@ var __ws_mu: Map = Map.new()
 var __ws_fds: Array = []
 var __ws_rooms: Array = []
 var __ws_ready: int = 0
+// Set by ws_drain_close (under __ws_mu) before it empties the registry.
+// Tells a waking reader whether the fd it lost ownership of was already
+// closed by the drain (1) or only shutdown()-ed by ws_leave (0) — see the
+// ownership table in __reader.
+var __ws_draining: int = 0
 
-// Lazy mutex init (double-checked; worst case two mutex_new races on the
-// very first WS connection — benign: registration happens under whichever
-// mutex won the write, and all later calls see the same one).
-fn __ws_ensure() -> int {
+// Registry mutex init. NOT a benign race if two threads reach this
+// concurrently: pthread mutex_unlock on a mutex a thread never itself
+// locked (or locked a stale/half-initialized copy of) is UB, and on arm64
+// the plain store to __ws_ready can retire before the mutex_new() that
+// builds __ws_mu is visible to other cores — a second thread can observe
+// __ws_ready == 1 while __ws_mu is still garbage. serve_app removes the
+// race entirely by calling ws_init_registry() single-threaded, before it
+// spawns any worker/keep-alive thread — pthread_create() establishes a
+// happens-before edge, so every later thread sees a fully-built __ws_mu.
+// __ws_ensure() stays as a safety net for callers that exercise this
+// module outside serve_app (tests, standalone scripts).
+pub fn ws_init_registry() -> int {
     if __ws_ready == 0 {
         __ws_mu = mutex_new()
         __ws_ready = 1
     }
     return 0
+}
+
+fn __ws_ensure() -> int {
+    return ws_init_registry()
 }
 
 // Register a live connection in a room and spawn its dedicated reader
@@ -40,34 +57,61 @@ pub fn ws_join(fd: int, room: String) {
 
     fn __reader() -> int {
         var go: bool = true
+        var closed_here: bool = false
         while go {
             let data: String = tcp_read_partial(fd, 4096)
             if data.length() == 0 {
                 go = false
             } else {
                 if ws_is_close(data) {
-                    mutex_lock(__ws_mu)
-                    tcp_write(fd, ws_close())
-                    mutex_unlock(__ws_mu)
                     go = false
+                    // Close-echo path: take ownership BEFORE writing the
+                    // echo. If __ws_take returns 0, someone else (drain or
+                    // an explicit ws_leave) already took this fd
+                    // concurrently — the OS may have recycled it for an
+                    // unrelated connection, so writing into it now would be
+                    // corrupting a stranger's socket. Only write+close if
+                    // we actually won the take.
+                    if __ws_take(fd) == 1 {
+                        mutex_lock(__ws_mu)
+                        tcp_write(fd, ws_close())
+                        mutex_unlock(__ws_mu)
+                        tcp_close(fd)
+                    }
+                    closed_here = true
                 } else {
                     let b0: int = data.charAt(0)
                     var b1: int = 0
                     if data.length() > 1 {
                         b1 = data.charAt(1)
                     }
+                    // A legitimate TEXT frame that TCP happens to fragment
+                    // across reads would also trip this and close the
+                    // connection — accepted under push-only semantics with
+                    // small pings (see docs/API.md).
                     if b0 != 129 or b1 < 128 {
                         go = false
                     }
                 }
             }
         }
-        // Ownership of the close: only whoever removes the fd from the
-        // registry closes it. If ws_drain_close (or an explicit ws_leave)
-        // already took it, __ws_take returns 0 here and we no-op — avoids
-        // a double tcp_close racing an OS fd-recycle onto a new connection.
-        if __ws_take(fd) == 1 {
-            tcp_close(fd)
+        if closed_here == false {
+            // Reached by spontaneous EOF, an abnormal-frame close, or a
+            // wake from ws_leave's tcp_shutdown(). Ownership table:
+            //   __ws_take==1                     nobody else touched this
+            //                                     fd yet -> we close it.
+            //   __ws_take==0, __ws_draining==0   ws_leave took it and only
+            //                                     shutdown()-ed (shutdown
+            //                                     doesn't release the fd)
+            //                                     -> we still owe the close.
+            //   __ws_take==0, __ws_draining==1   ws_drain_close took it AND
+            //                                     already closed it itself
+            //                                     -> don't touch (may be
+            //                                     recycled by the OS by now).
+            let owned: int = __ws_take(fd)
+            if owned == 1 or __ws_draining == 0 {
+                tcp_close(fd)
+            }
         }
         return 0
     }
@@ -103,11 +147,18 @@ fn __ws_take(fd: int) -> int {
     return found
 }
 
-// Explicit unregister: removes the connection and closes its fd; the
-// reader thread wakes on EOF and no-ops (see __ws_take).
+// Explicit unregister: removes the connection and shuts it down; the
+// reader thread wakes on EOF and closes the fd (see __reader's ownership
+// table). tcp_close() alone would NOT wake a reader blocked in recv() on
+// this fd — only shutdown() does, by delivering EOF to that recv(). Using
+// tcp_close() here (as an earlier version did) would leave the reader
+// blocked indefinitely and, worse, risks the OS recycling the fd for an
+// unrelated new connection while the old reader is still attached to the
+// number — the recycled connection's bytes would then be stolen by a
+// thread that thinks it's still reading the old one.
 pub fn ws_leave(fd: int) {
     if __ws_take(fd) == 1 {
-        tcp_close(fd)
+        tcp_shutdown(fd, 2)
     }
 }
 
@@ -180,6 +231,10 @@ pub fn ws_accept(fd: int, room: String, headers: Array) -> int {
 pub fn ws_drain_close() -> int {
     __ws_ensure()
     mutex_lock(__ws_mu)
+    // Set BEFORE emptying the registry, under the same lock: any reader
+    // that loses the race on __ws_take right after this point must see
+    // __ws_draining == 1 and know the drain (not it) owns the close.
+    __ws_draining = 1
     let fds: Array = __ws_fds
     __ws_fds = []
     __ws_rooms = []
@@ -189,8 +244,18 @@ pub fn ws_drain_close() -> int {
     var i: int = 0
     while i < fds.length() {
         let fd: int = fds[i]
-        // Registry is already empty and mutex free here; lock anyway so this
-        // last write stays consistent with the module's no-interleave rule.
+        // A stalled client (zero-window, no reads) must not be able to
+        // hang the drain — the exit-0-by-deadline contract wins over
+        // delivering this last close frame.
+        tcp_set_timeout(fd, 1)
+        // The registry no longer lists this fd, so __ws_take can't hand it
+        // to anyone else at this point — but the fd's OWN reader thread is
+        // still alive and can independently win a race on the SAME fd if
+        // the client sends its own close frame right as we get here: the
+        // reader's close-echo path also writes+closes under __ws_mu (see
+        // __reader's ws_is_close branch), gated by its own __ws_take call.
+        // Holding this lock across our write+close keeps the two writes
+        // from interleaving on the wire either way.
         mutex_lock(__ws_mu)
         tcp_write(fd, cf)
         mutex_unlock(__ws_mu)

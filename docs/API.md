@@ -394,14 +394,21 @@ code. If a client sends anything other than a masked TEXT frame (the
 tolerated case is a client keepalive ping), the reader treats it as
 abnormal and closes the connection immediately; this also guards against a
 stale proxy recycling the fd and feeding it raw HTTP, which would otherwise
-let a zombie fd eat someone else's requests. If you need to read client
-messages, validate that input over a plain HTTP route instead — `ws_join`/
-`ws_accept` connections are broadcast targets, not RPC channels.
+let a zombie fd eat someone else's requests (a legitimate TEXT frame that
+TCP happens to fragment across two reads trips the same guard and closes
+the connection too — accepted under push-only semantics with small pings).
+If you need to read client messages, validate that input over a plain
+HTTP route instead — `ws_join`/`ws_accept` connections are broadcast
+targets, not RPC channels.
 
 **Cost**: every registered connection holds one OS thread for its whole
 lifetime (the reader). That's the tradeoff for close detection without
 polling; expect it to dominate resource usage before connection count does
-at any real scale.
+at any real scale. Broadcasts are also serialized (see `ws_broadcast`
+below) across the *entire* registry, not just one room: one client with a
+full send buffer (slow reader, dead connection not yet detected) stalls
+`tcp_write` and, with it, every `ws_broadcast` call to every room until
+that write returns or times out — there's no per-room or per-fd isolation.
 
 - **`ws_accept(fd: int, room: String, headers: Array) -> int`** — completes
   the 101 handshake on an fd handed over by an `app_ws` handler (reads the
@@ -423,9 +430,9 @@ at any real scale.
   completed the handshake yourself (e.g. via `app_ws`'s own
   `ws_handshake_response` flow) instead of `ws_accept`.
 
-- **`ws_leave(fd: int)`** — explicit unregister: removes the connection AND
-  closes its fd (the reader thread wakes on EOF and no-ops). Use it to
-  evict a connection without waiting for the client to disconnect.
+- **`ws_leave(fd: int)`** — explicit unregister: removes the connection and
+  shuts it down; the reader thread wakes on EOF and closes the fd. Use it
+  to evict a connection without waiting for the client to disconnect.
 
 - **`ws_broadcast(room: String, payload: String)`** — frames `payload` once
   and writes it to every connection currently in `room`. Broadcasts are
