@@ -518,15 +518,17 @@ fn __run_shutdown_hooks() -> int {
     return 0
 }
 
-// Allocation-free on purpose: this runs in signal context — GC/malloc locks
-// are not reentrant, so print()/concat/int_to_string/getenv (all of which
-// allocate) can deadlock the process if the signal lands mid-allocation.
-// Guard: a second SIGTERM must not re-close the (already closed, possibly
-// recycled) listener fd.
+// Desde nyx v0.24.32 (self-pipe del runtime) este handler corre en el THREAD
+// DRENADOR de señales, en contexto normal — ya puede alocar. Pero por lo
+// mismo corre en OTRO thread que el accept loop, y en Linux close() de un fd
+// NO despierta un accept() ya bloqueado en él (el viejo diseño funcionaba
+// porque la señal interrumpía al thread del accept). shutdown() SÍ lo
+// despierta (EINVAL); el close real del fd lo hace el accept loop al entrar
+// al drain, en su propio thread. Guard: el segundo SIGTERM es no-op.
 fn __on_sigterm(sig: int) -> int {
     if __serve_draining == 1 { return 0 }
     __serve_draining = 1
-    tcp_close(__serve_listener)
+    tcp_shutdown(__serve_listener, 2)
     return 0
 }
 
@@ -650,7 +652,10 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
     let server: int = tcp_listen("0.0.0.0", port)
     if server < 0 {
         print("ERROR: cannot listen on port " + int_to_string(port))
-        return 0
+        // -1 en bind fallido (campaña 2026-08-11, T6b): devolver 0 acá era
+        // indistinguible del shutdown limpio — un supervisor/systemd veía
+        // exit 0 con el puerto ocupado y no reintentaba ni alertaba.
+        return -1
     }
 
     __serve_listener = server
@@ -678,6 +683,9 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
                 // branch corre en contexto normal del accept loop, no en
                 // contexto de señal, así que alocar (concat/int_to_string)
                 // es seguro.
+                // El handler ahora hace shutdown() (despertar el accept);
+                // el CLOSE del fd es responsabilidad de este thread.
+                tcp_close(server)
                 print("[nyx-serve] SIGTERM: draining (deadline " + int_to_string(__drain_deadline_secs()) + "s)")
                 var w: int = 0
                 while w < __serve_workers {
