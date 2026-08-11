@@ -4,6 +4,20 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.7.1] - 2026-08-11
+
+### Fixed
+- **SIGTERM drain con el runtime self-pipe (nyx >= 0.24.32)**: el handler
+  hace `tcp_shutdown(fd, 2)` (despierta el accept desde otro thread) y el
+  close del listener pasa al accept loop. Con `tcp_close` en el handler el
+  main quedaba colgado para siempre bajo el runtime nuevo.
+- **`serve_app` devuelve -1 en bind fallido** (antes 0 — indistinguible del
+  shutdown limpio para un supervisor); el standalone sale con exit 1.
+
+Requiere nyx >= 0.24.32 para el drain correcto (con toolchains previos el
+shutdown()+close() sigue funcionando igual: la señal interrumpe al thread
+del accept y ambas rutas despiertan).
+
 ## [0.7.0] - 2026-08-11
 
 ### Added
