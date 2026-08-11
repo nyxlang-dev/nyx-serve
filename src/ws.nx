@@ -46,7 +46,9 @@ pub fn ws_join(fd: int, room: String) {
                 go = false
             } else {
                 if ws_is_close(data) {
+                    mutex_lock(__ws_mu)
                     tcp_write(fd, ws_close())
+                    mutex_unlock(__ws_mu)
                     go = false
                 } else {
                     let b0: int = data.charAt(0)
@@ -60,17 +62,27 @@ pub fn ws_join(fd: int, room: String) {
                 }
             }
         }
-        ws_leave(fd)
-        tcp_close(fd)
+        // Ownership of the close: only whoever removes the fd from the
+        // registry closes it. If ws_drain_close (or an explicit ws_leave)
+        // already took it, __ws_take returns 0 here and we no-op — avoids
+        // a double tcp_close racing an OS fd-recycle onto a new connection.
+        if __ws_take(fd) == 1 {
+            tcp_close(fd)
+        }
         return 0
     }
     thread_spawn(__reader)
 }
 
-// Explicit unregister (also called automatically by the reader on EOF).
-pub fn ws_leave(fd: int) {
+// Remove fd from the registry. Returns 1 if it was registered (caller now
+// owns closing the fd) or 0 if someone else (drain, or a concurrent
+// ws_leave/reader) removed it first — that someone else owns the close.
+// Prevents a double tcp_close on a fd the OS may have already recycled for
+// a new connection.
+fn __ws_take(fd: int) -> int {
     __ws_ensure()
     mutex_lock(__ws_mu)
+    var found: int = 0
     var nf: Array = []
     var nr: Array = []
     var i: int = 0
@@ -80,12 +92,23 @@ pub fn ws_leave(fd: int) {
             let r: String = __ws_rooms[i]
             nf.push(f)
             nr.push(r)
+        } else {
+            found = 1
         }
         i = i + 1
     }
     __ws_fds = nf
     __ws_rooms = nr
     mutex_unlock(__ws_mu)
+    return found
+}
+
+// Explicit unregister: removes the connection and closes its fd; the
+// reader thread wakes on EOF and no-ops (see __ws_take).
+pub fn ws_leave(fd: int) {
+    if __ws_take(fd) == 1 {
+        tcp_close(fd)
+    }
 }
 
 // Push a payload to every connection in a room. The mutex serializes
@@ -149,22 +172,26 @@ pub fn ws_accept(fd: int, room: String, headers: Array) -> int {
 }
 
 // Drain courtesy (called by serve_app's SIGTERM drain, BEFORE consumer
-// shutdown hooks): send a close frame to every registered connection and
-// close the fds under the mutex. Readers wake on EOF and no-op their
-// unregister (the registry is already cleared).
+// shutdown hooks): snapshot every registered fd and empty the registry
+// under the mutex, then — outside the lock — send each a close frame and
+// close its fd. Emptying the registry first makes this the owner of every
+// fd it took: readers that wake concurrently call __ws_take, get 0 (the
+// drain already removed them) and no-op instead of double-closing.
 pub fn ws_drain_close() -> int {
     __ws_ensure()
     mutex_lock(__ws_mu)
+    let fds: Array = __ws_fds
+    __ws_fds = []
+    __ws_rooms = []
+    mutex_unlock(__ws_mu)
+
     let cf: String = ws_close()
     var i: int = 0
-    while i < __ws_fds.length() {
-        let fd: int = __ws_fds[i]
+    while i < fds.length() {
+        let fd: int = fds[i]
         tcp_write(fd, cf)
         tcp_close(fd)
         i = i + 1
     }
-    __ws_fds = []
-    __ws_rooms = []
-    mutex_unlock(__ws_mu)
     return 0
 }

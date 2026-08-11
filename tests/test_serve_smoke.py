@@ -694,6 +694,13 @@ def main():
     proc_sh = spawn_daemon_capture(SH_PORT, ["--shutdown-marker", marker])
     try:
         check("daemon shutdown-hook arriba", wait_for_port(SH_PORT), "")
+
+        # WS abierto ANTES del SIGTERM: verifica que ws_drain_close() manda
+        # un close frame limpio antes de que corran los shutdown hooks.
+        s_ws = socket.create_connection(("127.0.0.1", SH_PORT), timeout=5)
+        ws_handshake(s_ws, "/rooms/drain")
+        time.sleep(0.3)
+
         proc_sh.send_signal(signal.SIGTERM)
         try:
             rc = proc_sh.wait(timeout=12)
@@ -709,6 +716,21 @@ def main():
         check("shutdown hooks: marcador con contenido esperado",
               os.path.exists(marker) and open(marker).read() == "shutdown-ok",
               "")
+
+        tail = b""
+        try:
+            s_ws.settimeout(3)
+            tail = s_ws.recv(4096)
+            got_close = len(tail) >= 1 and tail[0] == 0x88
+        except (socket.timeout, OSError):
+            got_close = False
+        finally:
+            try:
+                s_ws.close()
+            except OSError:
+                pass
+        check("drain: cliente WS recibe close frame limpio", got_close,
+              f"({tail[:8]!r})")
     finally:
         if proc_sh.poll() is None:
             proc_sh.kill()

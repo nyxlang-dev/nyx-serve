@@ -7,6 +7,7 @@ import "std/web"
 import "std/http"
 import "std/json"
 import "src/files"
+import "src/ws"
 
 // Global App reference for the MT handler (set by serve_app)
 var __serve_app: App = app_new()
@@ -687,6 +688,12 @@ pub fn serve_app(app: App, port: int, workers: int) -> int {
                     sleep(200)
                     waited = waited + 200
                 }
+                // Drain courtesy for WS (v0.7.0): close-frame + fd close for
+                // every registered connection, BEFORE consumer shutdown
+                // hooks — a snapshotting hook sees the WS world already
+                // quiet. Raw app_ws fds not registered via src/ws are still
+                // the handler's problem (documented).
+                ws_drain_close()
                 __run_shutdown_hooks()
                 print("[nyx-serve] drain complete, exiting")
                 return 0
