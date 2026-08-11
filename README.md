@@ -109,6 +109,33 @@ Server workers are set programmatically via `serve_app(app, port, workers)`.
 
 **Cookie sessions** require a running `nyx-kv` instance (via `std/session.nx`).
 
+## What's new in v0.7.0
+
+- **WebSocket rooms & broadcast** (`src/ws`): a mutex-guarded registry of
+  live connections (`fd <-> room`) layered on top of `app_ws` — `ws_join`/
+  `ws_accept(fd, room, headers)` register a connection and spawn a
+  dedicated reader thread (close/EOF detection only; push-only by design,
+  upstream frames are never delivered), `ws_broadcast(room, payload)` sends
+  to every connection in a room with serialized writes (frames never
+  interleave on a fd), `ws_leave(fd)` evicts a connection explicitly, and
+  `ws_count`/`ws_count_room` report live connections. `ws_accept` collapses
+  a typical handler to three lines. On `SIGTERM`, registered connections now
+  get drain courtesy (close frame + fd close) before `serve_on_shutdown`
+  hooks run, ahead of any consumer snapshot. See `docs/API.md`.
+
+**Novedades en v0.7.0**: salas y broadcast de WebSocket (`src/ws`) — un
+registro de conexiones vivas (`fd <-> sala`) protegido por mutex, encima de
+`app_ws`. `ws_join`/`ws_accept(fd, sala, headers)` registran una conexión y
+lanzan un thread lector dedicado (solo detecta close/EOF; push-only por
+diseño, no entrega frames entrantes), `ws_broadcast(sala, payload)` envía a
+todas las conexiones de una sala con escrituras serializadas (los frames
+nunca se interleavean en un mismo fd), `ws_leave(fd)` expulsa una conexión
+explícitamente, y `ws_count`/`ws_count_room` reportan conexiones vivas.
+`ws_accept` reduce un handler típico a tres líneas. En `SIGTERM`, las
+conexiones registradas ahora reciben cortesía de drain (frame de cierre +
+cierre de fd) antes de que corran los hooks de `serve_on_shutdown`, previo a
+cualquier snapshot del consumer. Ver `docs/API.md`.
+
 ## What's new in v0.6.1
 
 - **Shutdown hooks**: `serve_on_shutdown(handler)` registers a cleanup
@@ -247,9 +274,12 @@ redirects 3xx.
 - No automatic response compression
 - Cookie sessions depend on an external `nyx-kv` instance
 - `app_ws` handlers take full ownership of the socket fd once they return `1`
-  (do their own handshake/read/write/close loop) — there's no built-in
-  broadcast/pub-sub primitive across connections, and each connection is
-  served by whichever worker accepted it (no separate WS event loop)
+  (do their own handshake/read/write/close loop); `src/ws` layers rooms and
+  broadcast on top, but it's push-only — there are no client-side frame
+  helpers, and upstream messages from the client are not delivered to your
+  code (validate client input over a plain HTTP route instead). Each
+  connection is served by whichever worker accepted it (no separate WS
+  event loop)
 - `multipart_parse` is a standalone helper — it does **not** populate
   `req.form`; call it explicitly from the handler with the raw body and
   `Content-Type` header

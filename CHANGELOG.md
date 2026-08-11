@@ -4,6 +4,33 @@ All notable changes to nyx-serve are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is independent
 from the Nyx language toolchain.
 
+## [0.7.0] - 2026-08-11
+
+### Added
+- **WebSocket rooms & broadcast** (`src/ws`): a mutex-guarded registry of
+  live connections (`fd <-> room`) upstreamed from a proven production
+  pattern, layered on top of `app_ws`. `ws_join(fd, room)`/`ws_accept(fd,
+  room, headers)` register a connection and spawn a dedicated reader thread
+  per connection (close/EOF detection only — push-only by design, upstream
+  frames are never delivered to consumer code; a guard closes the
+  connection on anything other than a masked TEXT keepalive to protect
+  against a stale proxy recycling the fd). `ws_broadcast(room, payload)`
+  frames the payload once and writes it to every connection in the room,
+  serialized under the registry mutex so frames never interleave on a
+  single fd; a failed write is ignored and left for that connection's
+  reader to clean up on EOF. `ws_leave(fd)` explicitly unregisters and
+  closes a connection. `ws_count()`/`ws_count_room(room)` report live
+  connections. `ws_accept` collapses a typical `app_ws` handler to three
+  lines.
+- **Drain courtesy for registered WS connections**: `serve_app`'s `SIGTERM`
+  drain now closes every `src/ws`-registered connection (close frame + fd
+  close) before consumer `serve_on_shutdown` hooks run, so a snapshotting
+  hook sees the WS world already quiet. Raw `app_ws` fds never registered
+  via `ws_join`/`ws_accept` are unaffected — they remain the handler's own
+  responsibility, as before.
+
+Smoke: 61/61.
+
 ## [0.6.1] - 2026-08-10
 
 ### Added

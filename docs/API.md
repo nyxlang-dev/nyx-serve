@@ -263,9 +263,11 @@ keep-alive loop — it never reaches the dispatcher, so it is never
 access-logged. The WS paths (a successful upgrade, and the WS-specific `404`
 when no route matches) are also outside the dispatcher and are never
 access-logged. Established WebSocket connections get no drain courtesy
-either — the fd is owned by the WS handler once it takes over, not by the
+**unless registered via `src/ws`** (`ws_join`/`ws_accept`, see
+[WebSocket rooms & broadcast](#websocket-rooms--broadcast)) — a raw
+`app_ws` fd is owned by the handler once it takes over, not by the
 keep-alive worker, so the main process still exits at the deadline
-regardless of any open WS connections.
+regardless of any open unregistered WS connections.
 
 ```bash
 NYX_SERVE_DRAIN_SECS=5 ./my-server   # cap drain wait at 5s
@@ -377,6 +379,73 @@ handler under the catch-all pattern. Prefer `app_ws(pattern, handler)` for
 new code, since a `"*"` registration swallows every WS upgrade request
 (there's no way for another `app_ws` pattern to take precedence, and the
 "no route matched" 404 becomes unreachable).
+
+### WebSocket rooms & broadcast
+
+From `nyx-serve/src/ws` (`import "nyx-serve/src/ws"`). A thin layer on top
+of `app_ws`/raw fds: a mutex-guarded registry of live connections (`fd <->
+room`), one dedicated reader thread per connection, and serialized
+broadcast. It does not replace `app_ws` — you still do the handshake (or
+call `ws_accept`, which does it for you) and hand the fd over.
+
+**Push-only by design.** The registry's reader thread exists only to detect
+close/EOF and unregister the fd — it never delivers upstream frames to your
+code. If a client sends anything other than a masked TEXT frame (the
+tolerated case is a client keepalive ping), the reader treats it as
+abnormal and closes the connection immediately; this also guards against a
+stale proxy recycling the fd and feeding it raw HTTP, which would otherwise
+let a zombie fd eat someone else's requests. If you need to read client
+messages, validate that input over a plain HTTP route instead — `ws_join`/
+`ws_accept` connections are broadcast targets, not RPC channels.
+
+**Cost**: every registered connection holds one OS thread for its whole
+lifetime (the reader). That's the tradeoff for close detection without
+polling; expect it to dominate resource usage before connection count does
+at any real scale.
+
+- **`ws_accept(fd: int, room: String, headers: Array) -> int`** — completes
+  the 101 handshake on an fd handed over by an `app_ws` handler (reads the
+  `Sec-WebSocket-Key` from `headers`), joins `room`, and spawns the reader.
+  Returns `1` if it took ownership of the fd, `0` if the handshake failed
+  (no key found or the write failed) — in that case respond/close normally,
+  same as returning `0` from `app_ws`. Collapses a typical handler to:
+
+  ```nyx
+  fn ws_handler(info: Array) -> int {
+      let fd: int = info[0]
+      let headers: Array = info[2]
+      return ws_accept(fd, "lobby", headers)
+  }
+  ```
+
+- **`ws_join(fd: int, room: String)`** — lower-level: register an
+  already-upgraded fd in `room` and spawn its reader. Use this if you
+  completed the handshake yourself (e.g. via `app_ws`'s own
+  `ws_handshake_response` flow) instead of `ws_accept`.
+
+- **`ws_leave(fd: int)`** — explicit unregister: removes the connection AND
+  closes its fd (the reader thread wakes on EOF and no-ops). Use it to
+  evict a connection without waiting for the client to disconnect.
+
+- **`ws_broadcast(room: String, payload: String)`** — frames `payload` once
+  and writes it to every connection currently in `room`. Broadcasts are
+  serialized under the registry mutex, so frames from concurrent
+  `ws_broadcast` calls never interleave on a single fd. A failed write to
+  one fd is ignored (not retried, doesn't abort the loop) — that
+  connection's reader will observe the EOF/error on its own and clean up.
+
+- **`ws_count() -> int`** / **`ws_count_room(room: String) -> int`** — live
+  connection count, overall or scoped to one room.
+
+**Drain courtesy**: on `SIGTERM`, `serve_app`'s drain calls the registry's
+internal close-everything step before consumer `serve_on_shutdown` hooks
+run — every connection registered via `ws_join`/`ws_accept` gets a close
+frame and its fd closed, so a shutdown hook that snapshots state sees the
+WS world already quiet. This courtesy is scoped to the registry: an
+`app_ws` fd the handler never registered through `ws_join`/`ws_accept`
+(i.e. it does its own raw handshake/read/write/close loop, as documented
+under `app_ws` above) gets none of it — see the drain note under
+[Graceful shutdown (SIGTERM)](#graceful-shutdown-sigterm).
 
 ---
 
