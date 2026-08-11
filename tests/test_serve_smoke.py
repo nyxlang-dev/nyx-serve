@@ -205,6 +205,19 @@ def main():
         if failed:
             return 1
 
+        # T6b (campaña 2026-08-11): serve_app devuelve -1 en bind fallido y
+        # el standalone sale con código != 0 — antes exit 0 con el puerto
+        # ocupado era indistinguible del shutdown limpio (un supervisor no
+        # reintentaba ni alertaba). El daemon de arriba YA ocupa PORT.
+        bind_fail = subprocess.run(
+            [BINARY, "--port", str(PORT)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10,
+        )
+        check("bind fallido → exit != 0", bind_fail.returncode != 0,
+              f"(rc {bind_fail.returncode}, salida {bind_fail.stdout[:80]!r})")
+        check("bind fallido → mensaje ERROR", b"ERROR" in bind_fail.stdout,
+              f"({bind_fail.stdout[:80]!r})")
+
         _, status, body = get(None, "/")
         check("GET / → 200", status == 200, f"(status {status})")
         check("GET / body", b"nyx-serve" in body, f"({body[:60]!r})")

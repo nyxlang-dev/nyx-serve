@@ -464,5 +464,12 @@ fn main() {
     app_mount(app, "/pub", pub_router)
 
     print("nyx-serve standalone on :" + int_to_string(port))
-    serve_app(app, port, 4)
+    // T6b (campaña 2026-08-11): serve_app devuelve -1 en bind fallido — el
+    // proceso debe salir con código != 0 para que un supervisor se entere
+    // (antes: exit 0 con el puerto ocupado, indistinguible del shutdown
+    // limpio).
+    let rc: int = serve_app(app, port, 4)
+    if rc < 0 {
+        exit(1)
+    }
 }
