@@ -382,7 +382,7 @@ new code, since a `"*"` registration swallows every WS upgrade request
 
 ### WebSocket rooms & broadcast
 
-From `nyx-serve/src/ws` (`import "nyx-serve/src/ws"`). A thin layer on top
+From `nyx-serve/src/ws`. A thin layer on top
 of `app_ws`/raw fds: a mutex-guarded registry of live connections (`fd <->
 room`), one dedicated reader thread per connection, and serialized
 broadcast. It does not replace `app_ws` — you still do the handshake (or
