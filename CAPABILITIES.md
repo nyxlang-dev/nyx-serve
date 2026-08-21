@@ -1,6 +1,6 @@
 # CAPABILITIES — índice de la stdlib de Nyx
 
-<!-- nyx-version: 0.24.30 -->
+<!-- nyx-version: 0.31.0 -->
 > Auto-generado por `nyx capabilities` desde la stdlib instalada — siempre en sync con tu versión.
 > Es el índice de QUÉ EXISTE: antes de escribir una función, buscá acá si un módulo ya lo hace,
 > `import`alo y usalo. NO leas el fuente de `std/`. Ver `AGENTS.md` para cómo escribir Nyx.
@@ -23,9 +23,10 @@
 
 ### `std/web`
 
-`import "std/web"` — 40 funciones:
+`import "std/web"` — 41 funciones:
 
 - `pub fn request_new() -> Request`
+- `pub fn request_with(method: String, path: String) -> Request` — Request sintético con method y path — para tests de handlers y helpers. Los demás campos vienen frescos y utilizables (mismo contrato que request_new).
 - `pub fn url_decode(s: String) -> String`
 - `pub fn parse_query_string(path: String) -> Map`
 - `pub fn parse_form_data(body: String, content_type: String) -> Map`
@@ -68,7 +69,7 @@
 
 ### `std/http`
 
-`import "std/http"` — 18 funciones:
+`import "std/http"` — 21 funciones:
 
 - `pub fn http_status_text(code: int) -> String`
 - `pub fn http_response(status: int, body: String) -> String`
@@ -78,6 +79,9 @@
 - `pub fn http_get(url: String) -> Array`
 - `pub fn http_post(url: String, body: String) -> Array`
 - `pub fn http_request(method: String, url: String, headers: Array, body: String) -> Array`
+- `pub fn try_http_get(url: String) -> Result<Array, Error>`
+- `pub fn try_http_post(url: String, body: String) -> Result<Array, Error>`
+- `pub fn try_http_request(method: String, url: String, headers: Array, body: String) -> Result<Array, Error>`
 - `pub fn http_status(resp: Array) -> int`
 - `pub fn http_body(resp: Array) -> String`
 - `pub fn http_headers(resp: Array) -> Array`
@@ -117,38 +121,42 @@
 
 ### `std/sqlite`
 
-`import "std/sqlite"` — 24 funciones:
+`import "std/sqlite"` — 28 funciones:
 
-- `pub fn sqlite_open(path: String) -> *int`
+- `pub fn sqlite_open(path: String) -> *int` — Abre (o crea) el archivo. Devuelve el handle *int — capturable en closures sin drama (fn de std con retorno declarado).
 - `pub fn sqlite_close(db: *int)`
-- `pub fn sqlite_exec(db: *int, sql: String) -> bool`
-- `pub fn sqlite_query(db: *int, sql: String) -> Array`
-- `pub fn sqlite_query_named(db: *int, sql: String) -> Array`
+- `pub fn sqlite_exec(db: *int, sql: String) -> bool` — DDL/DML sin resultado; true en éxito. Para SQL con valores usar sqlite_exec_params (params String).
+- `pub fn sqlite_query(db: *int, sql: String) -> Array` — Array de filas; cada fila es Array y TODA celda es String — incluidas columnas INTEGER (pasar por string_to_int; leerla como int devuelve el PUNTERO como número, silencioso). Celda SQL NULL llega como la cadena "NULL". Para ints reales: sqlite_query_int.
+- `pub fn sqlite_query_named(db: *int, sql: String) -> Array` — Como sqlite_query pero ANTEPONE una fila de headers: N+1 elementos, la fila 0 son los nombres de columna.
 - `pub fn sqlite_exec_int(db: *int, sql: String, val: int) -> bool`
 - `pub fn sqlite_exec_str(db: *int, sql: String, val: String) -> bool`
-- `pub fn sqlite_last_id(db: *int) -> int`
+- `pub fn sqlite_last_id(db: *int) -> int` — last_insert_rowid del handle.
 - `pub fn sqlite_affected(db: *int) -> int`
-- `pub fn sqlite_error(db: *int) -> String`
+- `pub fn sqlite_error(db: *int) -> String` — Mensaje del último error del handle (sqlite3_errmsg).
+- `pub fn try_sqlite_open(path: String) -> Result<*int, Error>`
+- `pub fn try_sqlite_exec(db: *int, sql: String) -> Result<int, Error>`
+- `pub fn try_sqlite_query(db: *int, sql: String) -> Result<Array, Error>`
+- `pub fn try_sqlite_query_named(db: *int, sql: String) -> Result<Array, Error>`
 - `pub fn sqlite_begin(db: *int) -> bool`
 - `pub fn sqlite_commit(db: *int) -> bool`
 - `pub fn sqlite_rollback(db: *int) -> bool`
-- `pub fn sqlite_query_int(db: *int, sql: String) -> Array`
-- `pub fn sqlite_query_one_int(db: *int, sql: String) -> int`
-- `pub fn sqlite_query_one_str(db: *int, sql: String) -> String`
-- `pub fn sqlite_exec_params(db: *int, sql: String, params: Array) -> bool`
-- `pub fn sqlite_query_params(db: *int, sql: String, params: Array) -> Array`
+- `pub fn sqlite_query_int(db: *int, sql: String) -> Array` — Filas de int REALES (sqlite3_column_int) — la vía tipada para columnas numéricas, sin string_to_int.
+- `pub fn sqlite_query_one_int(db: *int, sql: String) -> int` — Primera columna de la primera fila como int real; 0 si no hay filas.
+- `pub fn sqlite_query_one_str(db: *int, sql: String) -> String` — Primera columna de la primera fila como String; "" si no hay filas. NULL llega como "NULL".
+- `pub fn sqlite_exec_params(db: *int, sql: String, params: Array) -> bool` — TODOS los params como String (binding textual), también los numéricos: ["7", "ana"] y no [7, "ana"].
+- `pub fn sqlite_query_params(db: *int, sql: String, params: Array) -> Array` — Query con params (todos String, binding textual). Celdas del resultado: String, como sqlite_query.
 - `pub fn sqlite_migrate_init(db: *int) -> bool`
 - `pub fn sqlite_migrate_version(db: *int) -> int`
 - `pub fn sqlite_migrate(db: *int, version: int, name: String, sql: String) -> bool`
 - `pub fn sqlite_tables(db: *int) -> Array`
 - `pub fn sqlite_table_exists(db: *int, name: String) -> bool`
-- `pub fn sqlite_count(db: *int, table: String) -> int`
+- `pub fn sqlite_count(db: *int, table: String) -> int` — SELECT COUNT(*) de la tabla, como int real.
 
 ## Serialización & datos
 
 ### `std/json`
 
-`import "std/json"` — 17 funciones:
+`import "std/json"` — 20 funciones:
 
 - `pub fn json_null() -> Array`
 - `pub fn json_bool(val: bool) -> Array`
@@ -159,14 +167,17 @@
 - `pub fn json_object(keys: Array, vals: Array) -> Array`
 - `pub fn json_type(val: Array) -> String`
 - `pub fn json_get(obj: Array, key: String) -> Array`
+- `pub fn try_json_get(obj: Array, key: String) -> Result<Array, Error>`
 - `pub fn json_as_string(val: Array) -> String`
 - `pub fn json_as_int(val: Array) -> int`
 - `pub fn json_as_float(val: Array) -> float`
 - `pub fn json_array_get(arr: Array, i: int) -> Array`
+- `pub fn try_json_array_get(arr: Array, i: int) -> Result<Array, Error>`
 - `pub fn json_array_len(arr: Array) -> int`
 - `pub fn json_escape(s: String) -> String`
 - `pub fn json_stringify(val: Array) -> String`
 - `pub fn json_parse(input: String) -> Array`
+- `pub fn try_json_parse(input: String) -> Result<Array, Error>`
 
 ### `std/toml`
 
@@ -248,6 +259,13 @@
 
 - `pub fn println(s: String)`
 
+### `std/fs`
+
+`import "std/fs"` — 2 funciones:
+
+- `pub fn try_read_file(path: String) -> Result<String, Error>`
+- `pub fn try_write_file(path: String, content: String) -> Result<int, Error>`
+
 ### `std/file`
 
 `import "std/file"` — 2 funciones:
@@ -264,6 +282,27 @@
 - `pub fn h2_check_upgrade(request: String) -> bool`
 - `pub fn h2_send_response(fd: int, stream_id: int, status: int, resp_headers: Array, body: String) -> int`
 - `pub fn h2_serve(port: int, num_workers: int, cb: Fn) -> int`
+
+### `std/net`
+
+`import "std/net"` — 16 funciones:
+
+- `pub fn try_tcp_connect(host: String, port: int) -> Result<int, Error>`
+- `pub fn try_tcp_listen(host: String, port: int) -> Result<int, Error>`
+- `pub fn try_udp_bind(host: String, port: int) -> Result<int, Error>`
+- `pub fn try_tcp_accept(listen_fd: int) -> Result<int, Error>`
+- `pub fn try_tcp_read(fd: int, max: int) -> Result<String, Error>`
+- `pub fn try_tcp_write(fd: int, data: String) -> Result<int, Error>`
+- `pub fn try_udp_sendto(fd: int, data: String, host: String, port: int) -> Result<int, Error>`
+- `pub fn try_udp_recvfrom(fd: int, max: int) -> Result<String, Error>`
+- `pub fn try_resolve(host: String) -> Result<String, Error>`
+- `pub fn try_tcp_read_line(fd: int) -> Result<String, Error>`
+- `pub fn try_tcp_read_partial(fd: int, max: int) -> Result<String, Error>`
+- `pub fn try_tcp_read_exact(fd: int, n: int) -> Result<String, Error>`
+- `pub fn try_tcp_shutdown(fd: int, mode: int) -> Result<int, Error>`
+- `pub fn try_tcp_set_timeout(fd: int, secs: int) -> Result<int, Error>`
+- `pub fn try_getpeername(fd: int) -> Result<String, Error>`
+- `pub fn try_resolve_ptr(ip: String) -> Result<String, Error>`
 
 ### `std/url`
 
@@ -828,6 +867,15 @@
 
 - `pub fn route_match(pattern: String, hash: String) -> Array`
 - `pub fn route_resolve(routes_patterns: Array, hash: String, default_idx: int) -> Array`
+
+### `std/error`
+
+`import "std/error"` — 4 funciones:
+
+- `pub fn err_new(code: int, kind: String, msg: String) -> Error`
+- `pub fn errno_to_kind(code: int) -> String`
+- `pub fn error_to_string(e: Error) -> String`
+- `pub fn is_eof(e: Error) -> bool`
 
 ### `std/dom`
 
