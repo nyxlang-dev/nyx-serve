@@ -15,7 +15,7 @@ for src in tests/*.nx; do
     name="$(basename "$src" .nx)"
     cp "$src" "$NYX_HOME/script.nx"
     if out=$(cd "$NYX_HOME" && NYX_PROJECT_DIR="$STACK" ./nyx_bootstrap >/dev/null 2>&1 && \
-             clang -O2 script.ll runtime/*.c -lgc -lpthread -ldl -lm -lssl -lcrypto -lz -o script_bin 2>/dev/null && \
+             clang -O2 script.ll runtime/*.c runtime/os/os_posix.c -lgc -lpthread -ldl -lm -lssl -lcrypto -lz -o script_bin 2>/dev/null && \
              timeout 60 ./script_bin 2>&1); then
         if echo "$out" | grep -q "ASSERTION FAILED"; then
             echo "FAIL $name (assertion)"
